@@ -34,7 +34,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>user32.lib;gdi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>user32.lib;gdi32.lib;dbghelp.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -43,12 +43,16 @@
     <ClCompile Include="TestWindow.cpp" />
     <ClCompile Include="OffsetFinder.cpp" />
     <ClCompile Include="BmpCapture.cpp" />
+    <ClCompile Include="PdbResolver.cpp" />
+    <ClCompile Include="ModuleBase.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DriverComm.hpp" />
     <ClInclude Include="TestWindow.hpp" />
     <ClInclude Include="OffsetFinder.hpp" />
     <ClInclude Include="BmpCapture.hpp" />
+    <ClInclude Include="PdbResolver.hpp" />
+    <ClInclude Include="ModuleBase.hpp" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -64,6 +64,12 @@ std::vector<uint8_t> DriverComm::readRange(HWND hwnd, uint32_t count) {
     return out;
 }
 
+void DriverComm::setSharedInfoAddr(uint64_t addr) {
+    SET_GSHAREDINFO_INPUT in{};
+    in.Address = addr;
+    ioctl(IOCTL_SET_GSHAREDINFO_ADDR, &in, sizeof(in), nullptr, 0, nullptr);
+}
+
 void DriverComm::setOffset(uint32_t offset) {
     SET_OFFSET_INPUT in{};
     in.Offset = offset;

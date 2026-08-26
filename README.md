@@ -105,63 +105,53 @@ Saídas em `driver\x64\Release\affctl.sys` e `app\x64\Release\affapp.exe`.
 
 ---
 
-## Calibração obrigatória: `FindGSharedInfo()` e structs
+## Resolução de `gSharedInfo` — automática via PDB (multi-build)
 
-O ponto que **precisa** de ajuste por-build é a localização de `gSharedInfo`.
-Em `driver/tagwnd.cpp`, a função `FindGSharedInfo()` é um **stub que retorna
-`nullptr`**. Enquanto ela retornar `nullptr`, `IOCTL_*` responde
-`STATUS_NOT_FOUND`/`STATUS_INVALID_PARAMETER` e o app imprime erro de discovery.
+**Zero calibração manual.** O app resolve `gSharedInfo` em runtime em três passos:
 
-### 1. Obter o endereço de `gSharedInfo` (WinDbg, na VM)
+1. **Base do módulo kernel** (`app/ModuleBase.cpp`): `EnumDeviceDrivers` +
+   `GetDeviceDriverBaseNameW` retornam a base virtual de `win32kbase.sys` no
+   kernel (exige processo Admin — que já temos).
+2. **RVA via PDB** (`app/PdbResolver.cpp`): `dbghelp` extrai `GUID+Age` do
+   `IMAGE_DEBUG_DIRECTORY` do `win32kbase.sys` local, baixa o PDB correto do
+   Microsoft Symbol Server (`https://msdl.microsoft.com/download/symbols`) e
+   chama `SymFromName("gSharedInfo")` → RVA exato.
+3. **Injeta no driver** via `IOCTL_SET_GSHAREDINFO_ADDR`: driver recebe
+   `base + RVA` e usa direto, sem pattern scan ou hardcoded.
+
+### Vantagens
+
+- **Preciso**: PDB é a fonte primária da Microsoft. Sem heurística/AOB.
+- **Future-proof**: Windows lança nova build → PDB novo publicado no Symbol
+  Server → app baixa automaticamente. Sem release teu.
+- **Kernel enxuto**: driver só recebe endereço. Zero disassembly em Ring 0.
+
+### Cache e requisitos
+
+- 1ª execução: precisa internet. PDB baixa uma vez (~poucos MB) em
+  `%TEMP%\SymCache`.
+- Execuções seguintes: totalmente offline; PDB serve do cache.
+- Symbol Server e caminho de cache configuráveis via variável de ambiente
+  `_NT_SYMBOL_PATH` (se já estiver definida, o app respeita).
+- Requer Admin (mesmo requisito de `sc start` + carga do driver).
+
+### Validação (opcional, WinDbg)
+
+Se quiser conferir se o endereço resolvido pelo app bate com o real:
 
 ```
 kd> x win32kbase!gSharedInfo
 ```
 
-Isso dá o endereço do símbolo. `gSharedInfo` é uma `SHAREDINFO` (às vezes exposta
-como `tagSHAREDINFO`). Inspecione:
+Deve casar com a linha `[pdb] endereco absoluto = 0x...` que `affapp.exe` imprime.
+
+O layout de `HANDLEENTRY`/`SHAREDINFO` em `driver/win32k_structs.h` é estável há
+muitas versões de Windows 10/11. Se algum dia mudar, valide com:
 
 ```
-kd> dt win32kbase!tagSHAREDINFO <endereco>
-```
-
-Confirme o campo `aheList` (ponteiro para o array de handle entries) e o
-deslocamento dele dentro da struct — deve bater com `driver/win32k_structs.h`.
-
-### 2. Validar o layout de `HANDLEENTRY` e da `tagWND`
-
-```
-kd> dt win32kfull!tagWND
+kd> dt win32kbase!tagSHAREDINFO
 kd> dt win32kbase!_HANDLEENTRY
 ```
-
-- Confirme que `HANDLEENTRY` começa com `phead` (ponteiro para objeto) e tem
-  `bType` (janela = `TYPE_WINDOW` = 1). Ajuste `win32k_structs.h` se divergir.
-- A flag DisplayAffinity fica dentro da `tagWND` (campos internos como
-  `bDisplayAffinity`/`dwExStyle` conforme a build). **Não precisa** cravar esse
-  offset à mão: a heurística do app descobre em runtime. O `dt win32kfull!tagWND`
-  serve só para **conferir** que o offset descoberto bate com o campo certo.
-
-### 3. Implementar `FindGSharedInfo()`
-
-Duas abordagens (escolha uma):
-
-- **Endereço derivado / símbolo:** se você tem símbolos carregados no ambiente,
-  resolva o endereço de `gSharedInfo` no módulo `win32kbase.sys` a partir da base
-  do módulo + RVA do símbolo (obtenha a base com `MmGetSystemRoutineAddress` de
-  uma export vizinha ou enumerando módulos carregados; some o RVA do símbolo
-  visto no WinDbg/PDB).
-- **Pattern scan (AOB):** localize, na seção de dados de `win32kbase.sys`, o
-  padrão de bytes que referencia `gSharedInfo` (por exemplo o `lea` que carrega
-  seu endereço dentro de uma função exportada que você inspeciona no WinDbg com
-  `u`), e extraia o endereço do deslocamento relativo. Mantenha o pattern isolado
-  nesta função.
-
-Substitua o `return nullptr;` pelo endereço resolvido (`PSHAREDINFO`).
-
-> Como `gSharedInfo` fica em `win32kbase.sys` (sessão), garanta que o acesso
-> ocorre no contexto de uma sessão de GUI válida. Para este PoC, as chamadas
-> partem do app (que tem GUI), então o IRP chega em contexto adequado.
 
 ---
 
@@ -218,8 +208,12 @@ Rode cada passo a partir de um snapshot limpo.
 
 ## Riscos conhecidos
 
-- `gSharedInfo`/`HANDLEENTRY`/`tagWND` **não são documentados** e variam por
-  versão. A heurística cobre o offset da flag; `FindGSharedInfo()` e o layout de
-  `HANDLEENTRY` precisam de validação WinDbg por build.
-- Driver não assinado exige Test Signing (marca d'água na área de trabalho).
-- Entrega é **código-fonte**; build e teste são responsabilidade sua na VM.
+- **Layout de `HANDLEENTRY`/`SHAREDINFO`**: não-documentado. Estável há muitas
+  versões, mas se a Microsoft mudar (ordem de `phead`/`bType`), edite
+  `driver/win32k_structs.h`. Todo o resto (endereço de `gSharedInfo`, offset da
+  flag na `tagWND`) já é dinâmico.
+- **Symbol Server (1ª execução)**: precisa internet pro download do PDB. Depois
+  serve do cache. Se estiver offline no 1º run, o app lança erro claro.
+- **Driver não assinado**: exige Test Signing (marca d'água). Assinatura formal
+  = EV cert + Microsoft Partner Center (fora do escopo do PoC).
+- **Entrega**: código-fonte; build e teste são responsabilidade sua na VM.

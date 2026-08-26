@@ -18,6 +18,10 @@ public:
     // Le 'count' bytes a partir do inicio da tagWND da janela 'hwnd'.
     std::vector<uint8_t> readRange(HWND hwnd, uint32_t count);
 
+    // Envia ao driver o endereco absoluto de gSharedInfo (resolvido no user-mode
+    // via base(win32kbase.sys) + RVA(PDB)).
+    void setSharedInfoAddr(uint64_t addr);
+
     // Informa ao driver o offset da flag DisplayAffinity descoberto pela heuristica.
     void setOffset(uint32_t offset);
 

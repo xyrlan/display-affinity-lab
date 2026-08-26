@@ -7,6 +7,8 @@
 #include "TestWindow.hpp"
 #include "OffsetFinder.hpp"
 #include "BmpCapture.hpp"
+#include "PdbResolver.hpp"
+#include "ModuleBase.hpp"
 
 #include <windows.h>
 #include <atomic>
@@ -91,6 +93,23 @@ int main(int argc, char** argv) {
 
     try {
         DriverComm comm; // abre \\.\AffCtl (lanca se driver nao carregado)
+
+        // --- Resolve gSharedInfo via PDB (100% preciso, future-proof) ---
+        printf("[pdb] resolvendo gSharedInfo em win32kbase.sys via PDB...\n");
+        uint64_t kernelBase = ModuleBase::find(L"win32kbase.sys");
+        printf("[pdb] base kernel de win32kbase.sys = 0x%llX\n",
+               (unsigned long long)kernelBase);
+
+        // Nota: dbghelp le o cabecalho local do binario (mesmo path do modulo
+        // kernel) para extrair GUID+Age e baixar o PDB certo do symbol server.
+        PdbResolver pdb(L"C:\\Windows\\System32\\win32kbase.sys");
+        uint32_t rva = pdb.rvaOf("gSharedInfo");
+        printf("[pdb] RVA de gSharedInfo = 0x%X\n", rva);
+
+        uint64_t gSharedInfoAddr = kernelBase + rva;
+        printf("[pdb] endereco absoluto = 0x%llX\n",
+               (unsigned long long)gSharedInfoAddr);
+        comm.setSharedInfoAddr(gSharedInfoAddr);
 
         // --- Discovery ---
         printf("[discovery] descobrindo offset da flag DisplayAffinity...\n");
