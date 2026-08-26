@@ -90,6 +90,31 @@ derivados é envolvida em `__try/__except (EXCEPTION_EXECUTE_HANDLER)`. Falha �
 retorna `STATUS_ACCESS_VIOLATION` ou `STATUS_INVALID_PARAMETER`, nunca BSOD.
 Valida buffers de IRP (tamanho de input/output) antes de tocar ponteiros.
 
+**Nota sobre validação de endereço kernel:** os endereços resolvidos (`aheList`,
+`phead`/tagWND) são endereços de **kernel**, não user-mode. Portanto:
+- **Não** usar `ProbeForRead`/`ProbeForWrite` sobre eles — essas rotinas exigem
+  endereço user-mode e lançam se receberem endereço kernel.
+- Pré-checar com `MmIsAddressValid(addr)` (best-effort; não é garantia sozinho).
+- A rede de segurança real é o `__try/__except` em torno da desreferência.
+- O buffer de saída do IRP é METHOD_BUFFERED (`SystemBuffer`), já mapeado e
+  seguro; a cópia final para ele fica igualmente dentro do `__try`.
+
+Esqueleto do handler `IOCTL_READ_RANGE`:
+```c
+__try {
+    PVOID pTagWnd = ResolveTagWnd(input->Hwnd);      // gSharedInfo→aheList→phead
+    if (!pTagWnd || !MmIsAddressValid(pTagWnd)) {
+        status = STATUS_INVALID_PARAMETER;
+    } else {
+        RtlCopyMemory(outBuf, pTagWnd, count);        // outBuf = SystemBuffer
+        status = STATUS_SUCCESS;
+    }
+} __except (EXCEPTION_EXECUTE_HANDLER) {
+    status = STATUS_ACCESS_VIOLATION;                 // sem BSOD
+}
+```
+Mesmo padrão em `IOCTL_CLEAR_AFFINITY` (escrita) e `IOCTL_READ_AFFINITY`.
+
 ### 3.2 User-mode App — `affapp.exe` (C++17)
 
 **Linguagem:** C++ completo — classes, RAII, STL.
