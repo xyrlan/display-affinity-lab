@@ -1,0 +1,43 @@
+; affctl.inf
+; INF minimo para o driver de teste affctl.sys.
+; Instalacao real neste PoC e feita via `sc create` (ver scripts/install.bat);
+; este INF existe para satisfazer o build do WDK e permitir instalacao manual.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+DriverVer   = 08/26/2026,1.0.0.0
+CatalogFile = affctl.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 12 ; %windir%\System32\drivers
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+affctl.sys = 1
+
+[DefaultInstall.NTamd64]
+CopyFiles = Drivers_Dir
+
+[DefaultInstall.NTamd64.Services]
+AddService = affctl,,affctl_Service
+
+[Drivers_Dir]
+affctl.sys
+
+[affctl_Service]
+DisplayName   = %ServiceName%
+ServiceType   = 1 ; SERVICE_KERNEL_DRIVER
+StartType     = 3 ; SERVICE_DEMAND_START
+ErrorControl  = 1 ; SERVICE_ERROR_NORMAL
+ServiceBinary = %12%\affctl.sys
+
+[Strings]
+ManufacturerName = "DisplayAffinityTool (test)"
+DiskName         = "affctl Install Disk"
+ServiceName      = "affctl DisplayAffinity test driver"
