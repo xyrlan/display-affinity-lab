@@ -6,50 +6,33 @@
 
 namespace {
 
-// Ponteiro cacheado para gSharedInfo (localizado uma vez por InitSharedInfo).
+// Ponteiro para gSharedInfo, injetado do user-mode via IOCTL_SET_GSHAREDINFO_ADDR.
+// O app resolve base(win32kbase.sys) + RVA(gSharedInfo do PDB) e envia o endereco
+// absoluto. Substitui o antigo pattern scan (100% preciso, future-proof).
 PSHAREDINFO g_pSharedInfo = nullptr;
 
 // Numero maximo de entradas que aceitamos indexar em aheList. Guarda defensiva
 // contra HWND com indice absurdo antes de confiar no array.
 constexpr unsigned long kMaxHandleIndex = 0x10000; // 16 bits
 
-// ---------------------------------------------------------------------------
-// FindGSharedInfo
-//
-// Localiza o endereco de gSharedInfo dentro de win32kbase.sys.
-//
-// gSharedInfo NAO e exportado, entao MmGetSystemRoutineAddress nao o encontra.
-// A abordagem correta e um pattern scan (AOB) na secao de dados do modulo
-// win32kbase.sys, OU derivar o endereco a partir de uma funcao exportada
-// conhecida que o referencia.
-//
-// ESTE STUB retorna nullptr de proposito. O pattern/endereco varia por build do
-// Windows e deve ser calibrado na VM alvo. Ver README secao
-// "Pattern e validacao de structs" para:
-//   - obter o endereco com WinDbg: `x win32kbase!gSharedInfo`
-//   - montar/ajustar o pattern de bytes aqui
-// Manter esta funcao isolada permite trocar so ela sem tocar no resto.
-// ---------------------------------------------------------------------------
-PSHAREDINFO FindGSharedInfo() {
-    // TODO(calibracao-VM): preencher com pattern scan real ou endereco derivado.
-    // Retornar (PSHAREDINFO)<endereco de gSharedInfo>.
-    return nullptr;
-}
-
 } // namespace
 
 namespace affctl {
 
-NTSTATUS InitSharedInfo() {
-    if (g_pSharedInfo != nullptr) {
-        return STATUS_SUCCESS;
+NTSTATUS SetSharedInfoAddress(PVOID addr) {
+    if (addr == nullptr) {
+        return STATUS_INVALID_PARAMETER;
     }
-    PSHAREDINFO p = FindGSharedInfo();
-    if (p == nullptr) {
-        return STATUS_NOT_FOUND;
+    // Pre-check best-effort. A rede real e o __try/__except nas leituras.
+    if (!MmIsAddressValid(addr)) {
+        return STATUS_INVALID_PARAMETER;
     }
-    g_pSharedInfo = p;
+    g_pSharedInfo = reinterpret_cast<PSHAREDINFO>(addr);
     return STATUS_SUCCESS;
+}
+
+NTSTATUS InitSharedInfo() {
+    return (g_pSharedInfo != nullptr) ? STATUS_SUCCESS : STATUS_INVALID_DEVICE_STATE;
 }
 
 PVOID ResolveTagWnd(ULONG_PTR hwnd) {

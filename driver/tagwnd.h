@@ -7,8 +7,14 @@
 
 namespace affctl {
 
-// Localiza gSharedInfo uma unica vez (cacheado). Idempotente.
-// Retorna STATUS_SUCCESS, ou STATUS_NOT_FOUND se o pattern scan falhar.
+// Recebe o endereco absoluto de gSharedInfo (calculado no user-mode via
+// base(win32kbase.sys) + RVA(gSharedInfo) do PDB). Deve ser chamado uma vez
+// antes de qualquer resolucao. Substitui o antigo pattern-scan stub.
+// Retorna STATUS_INVALID_PARAMETER se addr for nulo/invalido.
+NTSTATUS SetSharedInfoAddress(PVOID addr);
+
+// Valida se gSharedInfo ja foi configurado. STATUS_SUCCESS se sim,
+// STATUS_INVALID_DEVICE_STATE se ainda nao.
 NTSTATUS InitSharedInfo();
 
 // Resolve HWND -> ponteiro para a tagWND no kernel. Retorna nullptr se o handle

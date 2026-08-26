@@ -73,6 +73,16 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         break;
     }
 
+    case IOCTL_SET_GSHAREDINFO_ADDR: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(SET_GSHAREDINFO_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        SET_GSHAREDINFO_INPUT in = *reinterpret_cast<PSET_GSHAREDINFO_INPUT>(buffer);
+        status = affctl::SetSharedInfoAddress(reinterpret_cast<PVOID>(in.Address));
+        break;
+    }
+
     case IOCTL_SET_OFFSET: {
         if (buffer == nullptr || !InputAtLeast(stack, sizeof(SET_OFFSET_INPUT))) {
             status = STATUS_INVALID_PARAMETER;
@@ -180,10 +190,8 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = AffCtlDeviceControl;
     DriverObject->DriverUnload                         = AffCtlUnload;
 
-    // Tenta pre-localizar gSharedInfo; falha aqui nao e fatal — sera re-tentada
-    // na primeira operacao. Assim o driver carrega mesmo se o pattern precisar
-    // de calibracao (o app reportara o erro por IOCTL).
-    (void)affctl::InitSharedInfo();
+    // gSharedInfo e configurada pelo app via IOCTL_SET_GSHAREDINFO_ADDR
+    // (endereco resolvido no user-mode pelo PDB). Aqui apenas carregamos.
 
     return STATUS_SUCCESS;
 }
