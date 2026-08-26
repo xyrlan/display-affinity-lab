@@ -1,0 +1,16 @@
+# VS/WDK build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+*.user
+*.suo
+.vs/
+*.sys
+*.pdb
+*.cat
+*.lib
+*.exp
+*.obj
+*.exe
