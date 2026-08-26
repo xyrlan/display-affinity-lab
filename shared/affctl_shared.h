@@ -26,6 +26,8 @@
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x802, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_READ_AFFINITY \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_SET_GSHAREDINFO_ADDR \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Limite defensivo de bytes lidos da tagWND numa unica chamada de READ_RANGE.
 #define AFFCTL_MAX_RANGE 1024u
@@ -55,5 +57,12 @@ typedef struct _HWND_INPUT {
 typedef struct _READ_AFFINITY_OUTPUT {
     unsigned char Value;       // byte atual no offset (0x00 WDA_NONE / 0x01 WDA_MONITOR / 0x11 WDA_EXCLUDEFROMCAPTURE)
 } READ_AFFINITY_OUTPUT, *PREAD_AFFINITY_OUTPUT;
+
+// IOCTL_SET_GSHAREDINFO_ADDR - input
+// Endereco absoluto de gSharedInfo no kernel, resolvido pelo app via
+// (Base do win32kbase.sys) + (RVA de gSharedInfo obtido do PDB).
+typedef struct _SET_GSHAREDINFO_INPUT {
+    unsigned long long Address;
+} SET_GSHAREDINFO_INPUT, *PSET_GSHAREDINFO_INPUT;
 
 #pragma pack(pop)
