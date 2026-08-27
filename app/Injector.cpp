@@ -101,6 +101,26 @@ void Injector::inject(DriverComm& comm,
     comm.injectDll(in);
 }
 
+std::vector<uint32_t> Injector::enumPidsByName(const wchar_t* imageName) {
+    std::vector<uint32_t> pids;
+    if (imageName == nullptr || *imageName == 0) return pids;
+
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return pids;
+
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, imageName) == 0) {
+                pids.push_back(pe.th32ProcessID);
+            }
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return pids;
+}
+
 bool Injector::hasModuleLoaded(uint32_t pid, const wchar_t* dllBaseName) {
     // TH32CS_SNAPMODULE lista modulos user-mode. TH32CS_SNAPMODULE32 tambem
     // pega WOW64. Combinamos os dois via OR.

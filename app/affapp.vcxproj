@@ -73,6 +73,7 @@
     <ClInclude Include="ModuleBase.hpp" />
     <ClInclude Include="Injector.hpp" />
     <ClInclude Include="OffsetCache.hpp" />
+    <ClInclude Include="Version.hpp" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

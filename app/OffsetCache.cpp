@@ -52,6 +52,29 @@ std::optional<OffsetCacheEntry> load() {
     return e;
 }
 
+bool clear() {
+    HKEY hKey = nullptr;
+    LONG r = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kParamsSubKey, 0, KEY_SET_VALUE, &hKey);
+    if (r == ERROR_FILE_NOT_FOUND) {
+        // Nem a subkey existe — nada a limpar, comportamento equivalente a OK.
+        return true;
+    }
+    if (r != ERROR_SUCCESS) return false;
+
+    LONG r1 = RegDeleteValueW(hKey, kValOffset);
+    LONG r2 = RegDeleteValueW(hKey, kValClearMask);
+    RegCloseKey(hKey);
+
+    // Ambos ERROR_FILE_NOT_FOUND tambem contam como sucesso (ja estava limpo).
+    bool ok1 = (r1 == ERROR_SUCCESS || r1 == ERROR_FILE_NOT_FOUND);
+    bool ok2 = (r2 == ERROR_SUCCESS || r2 == ERROR_FILE_NOT_FOUND);
+    return ok1 && ok2;
+}
+
+const wchar_t* registryPath() {
+    return L"HKLM\\SYSTEM\\CurrentControlSet\\Services\\AffCtl\\Parameters";
+}
+
 bool save(const OffsetCacheEntry& entry) {
     HKEY hKey = nullptr;
     DWORD disposition = 0;

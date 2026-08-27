@@ -32,4 +32,14 @@ std::optional<OffsetCacheEntry> load();
 // Grava no Registry. Retorna true se OK. Falha comum: sem privilegio.
 bool save(const OffsetCacheEntry& entry);
 
+// Remove os valores Offset e ClearMask (mantem a subkey Parameters existente,
+// pois o service do driver pode ter outras entradas ali). Retorna true se
+// removeu ou se ja nao existiam; false se falhou por permissao. Usado pelo
+// --reset-cache quando o operador atualiza a build do Windows e o offset
+// persistido deixa de bater com a tagWND real.
+bool clear();
+
+// Caminho de exibicao usado pra --status. Nao ha efeito de I/O.
+const wchar_t* registryPath();
+
 } // namespace OffsetCache

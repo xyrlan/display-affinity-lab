@@ -37,4 +37,10 @@ public:
     // Enumera modulos carregados no processo `pid` e retorna true se algum
     // basename bater com `dllBaseName` (case-insensitive). Usa Toolhelp.
     static bool hasModuleLoaded(uint32_t pid, const wchar_t* dllBaseName);
+
+    // Enumera todos os processos ativos cujo basename == `imageName` (case-
+    // insensitive). Usado pelo --watch para alertar o operador de que ha
+    // instancias vivas — o callback do driver so pega processos criados
+    // APOS o registro.
+    static std::vector<uint32_t> enumPidsByName(const wchar_t* imageName);
 };
