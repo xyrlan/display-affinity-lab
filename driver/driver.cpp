@@ -208,7 +208,7 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             (win->ImageNameLen % sizeof(wchar_t)) != 0 ||
             win->DllPathLen == 0   || win->DllPathLen   > maxPathBytes ||
             (win->DllPathLen % sizeof(wchar_t)) != 0 ||
-            win->LoadLibraryAddr == 0) {
+            win->LdrLoadDllAddr == 0) {
             status = STATUS_INVALID_PARAMETER;
             break;
         }
@@ -219,7 +219,7 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         win->DllPath[win->DllPathLen / sizeof(wchar_t)] = L'\0';
         status = affctl::AddWatch(
             name, win->DllPath, win->DllPathLen,
-            (PVOID)(ULONG_PTR)win->LoadLibraryAddr);
+            (PVOID)(ULONG_PTR)win->LdrLoadDllAddr);
         break;
     }
 
@@ -259,7 +259,7 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         status = affctl::InjectDll(
             (HANDLE)(ULONG_PTR)in->TargetPid,
             (HANDLE)(ULONG_PTR)in->TargetTid,
-            (PVOID)(ULONG_PTR)in->LoadLibraryAddr,
+            (PVOID)(ULONG_PTR)in->LdrLoadDllAddr,
             in->DllPath,
             (SIZE_T)in->DllPathLen);
         break;

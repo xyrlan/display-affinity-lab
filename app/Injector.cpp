@@ -55,21 +55,22 @@ std::vector<uint32_t> Injector::enumThreadIds(uint32_t pid) {
     return tids;
 }
 
-uint64_t Injector::loadLibraryWAddr() {
-    HMODULE k = GetModuleHandleW(L"kernel32.dll");
-    if (!k) throw std::runtime_error("kernel32.dll nao carregado no processo atual");
-    FARPROC p = GetProcAddress(k, "LoadLibraryW");
-    if (!p) throw std::runtime_error("LoadLibraryW nao exportada");
+uint64_t Injector::ldrLoadDllAddr() {
+    HMODULE n = GetModuleHandleW(L"ntdll.dll");
+    if (!n) throw std::runtime_error("ntdll.dll nao carregado no processo atual");
+    FARPROC p = GetProcAddress(n, "LdrLoadDll");
+    if (!p) throw std::runtime_error("LdrLoadDll nao exportada");
     return reinterpret_cast<uint64_t>(p);
 }
 
 void Injector::inject(DriverComm& comm,
                       uint32_t pid,
                       uint32_t tid,
-                      uint64_t loadLibraryAddr,
+                      uint64_t ldrLoadDllAddr,
                       const std::wstring& dllPath) {
-    // Normaliza para caminho absoluto — LoadLibraryW aceita relativo, mas evita
-    // ambiguidade de SearchPath dentro do alvo (que pode ter cwd diferente).
+    // Normaliza para caminho absoluto — LdrLoadDll aceita relativo (usa PATH do
+    // alvo), mas evita ambiguidade de SearchPath dentro do alvo (que pode ter
+    // cwd diferente).
     wchar_t full[MAX_PATH];
     DWORD n = GetFullPathNameW(dllPath.c_str(), MAX_PATH, full, nullptr);
     if (n == 0 || n >= MAX_PATH) {
@@ -85,9 +86,9 @@ void Injector::inject(DriverComm& comm,
 
     // Monta struct do IOCTL.
     INJECT_DLL_INPUT in{};
-    in.TargetPid       = pid;
-    in.TargetTid       = tid;
-    in.LoadLibraryAddr = loadLibraryAddr;
+    in.TargetPid      = pid;
+    in.TargetTid      = tid;
+    in.LdrLoadDllAddr = ldrLoadDllAddr;
 
     size_t wlen  = wcslen(full);
     size_t bytes = wlen * sizeof(wchar_t);

@@ -72,7 +72,7 @@ void DriverComm::injectDll(const INJECT_DLL_INPUT& in) {
 
 void DriverComm::watchName(const wchar_t* imageName,
                            const wchar_t* dllPath,
-                           uint64_t       loadLibraryAddr) {
+                           uint64_t       ldrLoadDllAddr) {
     WATCH_NAME_INPUT in{};
     size_t nameChars = wcslen(imageName);
     size_t pathChars = wcslen(dllPath);
@@ -84,9 +84,9 @@ void DriverComm::watchName(const wchar_t* imageName,
     }
     memcpy(in.ImageName, imageName, nameChars * sizeof(wchar_t));
     memcpy(in.DllPath,   dllPath,   pathChars * sizeof(wchar_t));
-    in.ImageNameLen    = static_cast<unsigned long>(nameChars * sizeof(wchar_t));
-    in.DllPathLen      = static_cast<unsigned long>(pathChars * sizeof(wchar_t));
-    in.LoadLibraryAddr = loadLibraryAddr;
+    in.ImageNameLen   = static_cast<unsigned long>(nameChars * sizeof(wchar_t));
+    in.DllPathLen     = static_cast<unsigned long>(pathChars * sizeof(wchar_t));
+    in.LdrLoadDllAddr = ldrLoadDllAddr;
     ioctl(IOCTL_WATCH_NAME, &in, sizeof(in), nullptr, 0, nullptr);
 }
 

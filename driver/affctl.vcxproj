@@ -18,13 +18,6 @@
     <RootNamespace>affctl</RootNamespace>
     <TargetName>affctl</TargetName>
   </PropertyGroup>
-  <!-- Ancora output em $(ProjectDir) (a propria pasta do vcxproj) em vez de
-       $(SolutionDir), que varia com a .sln aberta. Garante affctl.sys sempre
-       em driver\x64\<Config>\ independente da solucao. -->
-  <PropertyGroup>
-    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
-    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\</IntDir>
-  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
@@ -42,6 +35,13 @@
     <EnableInf2cat>False</EnableInf2cat>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Ancora output em $(ProjectDir) (a propria pasta do vcxproj) em vez de
+       $(SolutionDir), que varia com a .sln aberta. Precisa vir DEPOIS dos
+       Cpp.*.props para nao ser sobrescrito pelos defaults do WDK. -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
   <ItemGroup>
     <ClCompile Include="driver.cpp" />
     <ClCompile Include="tagwnd.cpp" />

@@ -1,7 +1,7 @@
 // Injector.hpp
 // Lado user-mode da injecao via APC do kernel. Responsabilidades:
 //   1. Enumerar threads do PID alvo (Toolhelp) — driver so recebe TID pronto.
-//   2. Resolver LoadLibraryW em kernel32.dll — mesmo VA no alvo (ASLR per-boot).
+//   2. Resolver LdrLoadDll em ntdll.dll — mesmo VA no alvo (Known DLL, per-boot ASLR).
 //   3. Normalizar o path da DLL (absoluto + validar existencia).
 //   4. Chamar IOCTL_INJECT_DLL no driver via DriverComm.
 #pragma once
@@ -22,16 +22,16 @@ public:
     // alertable e dispara nossa carga.
     static std::vector<uint32_t> enumThreadIds(uint32_t pid);
 
-    // Endereco de kernel32!LoadLibraryW no processo atual. E o mesmo endereco
-    // no processo alvo (mesma sessao, mesmo boot).
-    static uint64_t loadLibraryWAddr();
+    // Endereco de ntdll!LdrLoadDll no processo atual. E o mesmo endereco
+    // no processo alvo — ntdll e Known DLL, VA identico em toda sessao/boot.
+    static uint64_t ldrLoadDllAddr();
 
     // Executa: normaliza path, enfileira APC via driver. Nao aguarda a APC
     // disparar (isso e feito quando a thread do alvo entrar em wait alertable).
     static void inject(DriverComm& comm,
                        uint32_t pid,
                        uint32_t tid,
-                       uint64_t loadLibraryAddr,
+                       uint64_t ldrLoadDllAddr,
                        const std::wstring& dllPath);
 
     // Enumera modulos carregados no processo `pid` e retorna true se algum

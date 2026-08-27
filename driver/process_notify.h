@@ -32,7 +32,7 @@ NTSTATUS AddWatch(
     PCWSTR imageName,
     PCWSTR dllPath,
     ULONG  dllPathBytes,
-    PVOID  loadLibraryAddr);
+    PVOID  ldrLoadDllAddr);
 
 // Remove um watch por nome exato. Marca processos ja injetados como nao mais
 // monitorados (nao remove a DLL que ja carregou).

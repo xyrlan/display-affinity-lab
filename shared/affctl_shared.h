@@ -129,11 +129,14 @@ typedef struct _RESOLVE_PID_OUTPUT {
 //   a) basename == ImageName
 //   b) ParentProcessId aponta pra um processo ja marcado (tree injection)
 // Injecao acontece no callback de thread create -> APC antes do EntryPoint rodar.
+//
+// Fase B1: o trampolim shellcode chama ntdll!LdrLoadDll (nao mais kernel32!LoadLibraryW)
+// pra fugir de allowlists triviais que assinam APCs com NormalRoutine em kernel32.
 typedef struct _WATCH_NAME_INPUT {
     wchar_t            ImageName[AFFCTL_MAX_IMAGE_NAME]; // basename do EXE alvo
     unsigned long      ImageNameLen;                     // bytes (sem NUL)
     unsigned long      DllPathLen;                       // bytes (sem NUL)
-    unsigned long long LoadLibraryAddr;                  // kernel32!LoadLibraryW
+    unsigned long long LdrLoadDllAddr;                   // ntdll!LdrLoadDll (VA no alvo)
     wchar_t            DllPath[520];                     // path absoluto da DLL
 } WATCH_NAME_INPUT, *PWATCH_NAME_INPUT;
 
@@ -145,12 +148,13 @@ typedef struct _UNWATCH_NAME_INPUT {
 } UNWATCH_NAME_INPUT, *PUNWATCH_NAME_INPUT;
 
 // IOCTL_INJECT_DLL - input
-// LoadLibraryW e resolvido no lado user (mesmo VA em todos processos da sessao,
-// por ASLR per-boot). O driver so executa: attach + alloc + copy + queue APC.
+// LdrLoadDll e resolvido no lado user (ntdll e Known DLL: mesmo VA em todos
+// processos da mesma sessao / boot). O driver so executa: attach + criar section
+// com shellcode+path + mapear no alvo + queue APC apontando pro trampolim.
 typedef struct _INJECT_DLL_INPUT {
     unsigned long long TargetPid;        // PID do processo alvo
     unsigned long long TargetTid;        // TID de uma thread do alvo (GUI = alertable rapido)
-    unsigned long long LoadLibraryAddr;  // Endereco de kernel32!LoadLibraryW
+    unsigned long long LdrLoadDllAddr;   // Endereco de ntdll!LdrLoadDll (VA no alvo)
     unsigned long      DllPathLen;       // Bytes do path (WCHAR count * 2), sem NUL
     unsigned long      _pad;
     wchar_t            DllPath[520];     // Path da DLL (max ~260 WCHARs = MAX_PATH)

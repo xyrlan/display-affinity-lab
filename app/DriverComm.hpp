@@ -52,7 +52,7 @@ public:
     // callback de thread create -> APC antes do EntryPoint rodar.
     void watchName(const wchar_t* imageName,
                    const wchar_t* dllPath,
-                   uint64_t       loadLibraryAddr);
+                   uint64_t       ldrLoadDllAddr);
 
     // Remove watch por nome.
     void unwatchName(const wchar_t* imageName);

@@ -166,12 +166,12 @@ static int probeDwm() {
 // Recebe PID ja resolvido + path da DLL (ANSI para logs e WIDE para o driver).
 static int injectDllIntoPid(DriverComm& comm, uint32_t pid,
                             const std::wstring& dllPathW, const char* dllPathA) {
-    uint64_t addr = Injector::loadLibraryWAddr();
+    uint64_t addr = Injector::ldrLoadDllAddr();
     auto tids = Injector::enumThreadIds(pid);
     if (tids.empty()) {
         throw std::runtime_error("nenhuma thread para PID " + std::to_string(pid));
     }
-    printf("[inject] pid=%u threads=%zu LoadLibraryW=0x%llX\n",
+    printf("[inject] pid=%u threads=%zu LdrLoadDll=0x%llX\n",
            pid, tids.size(), (unsigned long long)addr);
     printf("[inject] dll=%s\n", dllPathA);
     printf("[inject] enfileirando APC em TODAS as threads (shotgun):\n");
@@ -328,7 +328,7 @@ static void printHelp() {
 }
 
 // --inject <pid> [dll] — injecao via APC no kernel. Nao carrega discovery
-// nem toca gSharedInfo. So abre o device, resolve TID/LoadLibraryW e chama
+// nem toca gSharedInfo. So abre o device, resolve TID/LdrLoadDll e chama
 // IOCTL_INJECT_DLL. Requer driver ja carregado (sc start affctl).
 static int runInject(int argc, char** argv, int startIdx) {
     if (startIdx + 1 >= argc) {
@@ -405,9 +405,9 @@ static int runWatch(int argc, char** argv, int startIdx) {
 
     try {
         DriverComm comm;
-        uint64_t addr = Injector::loadLibraryWAddr();
+        uint64_t addr = Injector::ldrLoadDllAddr();
         comm.watchName(nameW.c_str(), dllPath.c_str(), addr);
-        printf("[watch] registrado: '%s' -> '%ls' (LoadLibraryW=0x%llX)\n",
+        printf("[watch] registrado: '%s' -> '%ls' (LdrLoadDll=0x%llX)\n",
                argv[startIdx + 1], dllPath.c_str(), (unsigned long long)addr);
         printf("[watch] Qualquer processo futuro com esse nome (e filhos) recebe\n");
         printf("        injecao APC no NASCIMENTO. Ate voce unregistrar via --unwatch\n");
