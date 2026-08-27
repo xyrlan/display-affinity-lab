@@ -32,10 +32,12 @@
   <ItemGroup>
     <ClCompile Include="driver.cpp" />
     <ClCompile Include="tagwnd.cpp" />
+    <ClCompile Include="inject.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="tagwnd.h" />
     <ClInclude Include="win32k_structs.h" />
+    <ClInclude Include="inject.h" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <ItemGroup>

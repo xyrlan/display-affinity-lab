@@ -14,3 +14,15 @@ x64/
 *.exp
 *.obj
 *.exe
+*.dll
+*.ilk
+*.tlog
+
+# Payload de teste (regerado a cada build)
+dist/
+
+# MinHook vendored (baixado localmente — ver README, setup inicial)
+third_party/minhook/
+
+# Cache de PDBs baixados do Symbol Server
+SymCache/

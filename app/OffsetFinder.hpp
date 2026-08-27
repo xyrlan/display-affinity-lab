@@ -11,10 +11,17 @@ class DriverComm;
 
 class OffsetFinder {
 public:
-    // Descobre o offset usando 'win' (janela propria) e o driver 'comm'.
-    // Retorna o offset em bytes. Lanca std::runtime_error se 0 ou >1 candidato
-    // sobreviverem a desambiguacao. Restaura WDA_NONE ao final.
-    // 'rangeBytes' = quantos bytes da tagWND varrer (default 512).
-    static uint32_t findOffset(DriverComm& comm, HWND hwnd,
-                               uint32_t rangeBytes = 512);
+    struct Result {
+        uint32_t offset;    // byte-offset dentro da tagWND
+        uint8_t  clearMask; // bits da afinidade dentro desse byte
+    };
+
+    // Descobre offset + mascara. Duas heuristicas em ordem:
+    //  1) Clasica (Win10/11 antigos): byte que vai 0x00 -> 0x11 -> 0x01
+    //     entre WDA_NONE, WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR. mask=0xFF.
+    //  2) Bit-flag (Win11 25H2+): unico byte que difere entre os estados.
+    //     mask = (mod XOR base).
+    // Lanca std::runtime_error se nenhuma heuristica achar.
+    static Result findOffset(DriverComm& comm, HWND hwnd,
+                             uint32_t rangeBytes = 4096);
 };

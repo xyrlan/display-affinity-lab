@@ -4,11 +4,15 @@
 // a logica interna (tagwnd.cpp) e C++.
 #include <ntddk.h>
 #include "tagwnd.h"
+#include "inject.h"
 #include "../shared/affctl_shared.h"
 
 // Offset da flag DisplayAffinity na tagWND, descoberto pelo app (heuristica) e
 // enviado via IOCTL_SET_OFFSET. 0xFFFFFFFF = ainda nao configurado.
 static ULONG g_offset = 0xFFFFFFFF;
+// Mascara dos bits, dentro do byte em g_offset, que representam a afinidade.
+// 0xFF = byte inteiro (Win10 e mais antigos); 0x01 e outras em Win11 25H2+.
+static UCHAR g_clearMask = 0xFF;
 
 static PDEVICE_OBJECT g_deviceObject = nullptr;
 
@@ -73,6 +77,55 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         break;
     }
 
+    case IOCTL_INJECT_DLL: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(INJECT_DLL_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        auto in = reinterpret_cast<PINJECT_DLL_INPUT>(buffer);
+        // Valida path length dentro dos limites do buffer estatico.
+        const ULONG maxBytes =
+            (ULONG)(sizeof(in->DllPath) - sizeof(wchar_t)); // deixa espaco pro NUL
+        if (in->DllPathLen == 0 || in->DllPathLen > maxBytes) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        status = affctl::InjectDll(
+            (HANDLE)(ULONG_PTR)in->TargetPid,
+            (HANDLE)(ULONG_PTR)in->TargetTid,
+            (PVOID)(ULONG_PTR)in->LoadLibraryAddr,
+            in->DllPath,
+            (SIZE_T)in->DllPathLen);
+        break;
+    }
+
+    case IOCTL_SET_VALIDATE_HWND: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(SET_VALIDATE_HWND_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        SET_VALIDATE_HWND_INPUT in = *reinterpret_cast<PSET_VALIDATE_HWND_INPUT>(buffer);
+        status = affctl::SetValidateHwndAddress(reinterpret_cast<PVOID>(in.Address));
+        break;
+    }
+
+    case IOCTL_AFF_DIAG: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(HWND_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (!OutputAtLeast(stack, sizeof(AFF_DIAG_OUTPUT))) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        HWND_INPUT in = *reinterpret_cast<PHWND_INPUT>(buffer); // copia antes de sobrescrever
+        status = affctl::Diag((ULONG_PTR)in.Hwnd, buffer);
+        if (NT_SUCCESS(status)) {
+            info = sizeof(AFF_DIAG_OUTPUT);
+        }
+        break;
+    }
+
     case IOCTL_SET_GSHAREDINFO_ADDR: {
         if (buffer == nullptr || !InputAtLeast(stack, sizeof(SET_GSHAREDINFO_INPUT))) {
             status = STATUS_INVALID_PARAMETER;
@@ -93,7 +146,8 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             status = STATUS_INVALID_PARAMETER;
             break;
         }
-        g_offset = in.Offset;
+        g_offset    = in.Offset;
+        g_clearMask = in.ClearMask ? in.ClearMask : 0xFF; // seguranca contra 0
         status = STATUS_SUCCESS;
         break;
     }
@@ -108,7 +162,7 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             break;
         }
         HWND_INPUT in = *reinterpret_cast<PHWND_INPUT>(buffer);
-        status = affctl::ClearFlag((ULONG_PTR)in.Hwnd, g_offset);
+        status = affctl::ClearFlag((ULONG_PTR)in.Hwnd, g_offset, g_clearMask);
         break;
     }
 
@@ -130,7 +184,9 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         status = affctl::ReadFlag((ULONG_PTR)in.Hwnd, g_offset, &value);
         if (NT_SUCCESS(status)) {
             auto out = reinterpret_cast<PREAD_AFFINITY_OUTPUT>(buffer);
-            out->Value = value;
+            // Retorna somente os bits da afinidade — app le "0 = sem afinidade,
+            // != 0 = ativa" independente do encoding (byte inteiro ou bit-flag).
+            out->Value = value & g_clearMask;
             info = sizeof(READ_AFFINITY_OUTPUT);
         }
         break;

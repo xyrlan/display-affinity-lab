@@ -96,6 +96,24 @@ PdbResolver::~PdbResolver() {
     }
 }
 
+// Callback do SymEnumSymbols
+static BOOL CALLBACK enumCb(PSYMBOL_INFO info, ULONG /*size*/, PVOID ctx) {
+    auto* out = reinterpret_cast<std::vector<PdbResolver::SymHit>*>(ctx);
+    PdbResolver::SymHit h;
+    h.name = std::string(info->Name, info->NameLen);
+    // Address vem em endereco absoluto (base ficticia + rva). Base = 0x10000000.
+    h.rva  = static_cast<uint32_t>(info->Address - 0x10000000ULL);
+    h.size = info->Size;
+    out->push_back(std::move(h));
+    return TRUE; // continua
+}
+
+std::vector<PdbResolver::SymHit> PdbResolver::enumSymbols(const char* mask) const {
+    std::vector<SymHit> out;
+    SymEnumSymbols(m_hProcess, m_moduleBase, mask, enumCb, &out);
+    return out;
+}
+
 uint32_t PdbResolver::rvaOf(const char* symbol) const {
     // SYMBOL_INFO + buffer p/ nome.
     constexpr size_t kMaxName = 256;

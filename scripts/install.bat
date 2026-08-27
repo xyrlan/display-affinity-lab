@@ -22,9 +22,7 @@ echo.
 
 echo === Criando e iniciando servico 'affctl' ===
 sc create affctl type= kernel start= demand binPath= "%DRV%"
-if errorlevel 1 (
-    echo [aviso] sc create falhou (servico ja existe?). Tentando start mesmo assim.
-)
+if errorlevel 1 echo [aviso] sc create falhou - servico ja existe? Tentando start mesmo assim.
 sc start affctl
 if errorlevel 1 (
     echo [erro] sc start falhou. Test Signing ligado? Rebootou apos ligar?

@@ -28,9 +28,20 @@
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_SET_GSHAREDINFO_ADDR \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Diagnostico: despeja bytes crus de gSharedInfo e da entrada de handle calculada.
+#define IOCTL_AFF_DIAG \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Endereco absoluto de win32kbase!ValidateHwnd (resolvido no app via PDB).
+// Substitui a resolucao via aheList.phead (nao mais viavel a partir de Win11 25H2).
+#define IOCTL_SET_VALIDATE_HWND \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x806, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Injeta uma DLL no processo alvo via APC no kernel (KeStackAttachProcess +
+// ZwAllocateVirtualMemory + KeInsertQueueApc). O app resolve PID/TID/LoadLibraryW.
+#define IOCTL_INJECT_DLL \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Limite defensivo de bytes lidos da tagWND numa unica chamada de READ_RANGE.
-#define AFFCTL_MAX_RANGE 1024u
+#define AFFCTL_MAX_RANGE 8192u
 
 // -------- Structs de I/O --------
 // HWND viaja como inteiro de 64 bits para ter layout identico em kernel e user.
@@ -44,8 +55,15 @@ typedef struct _READ_RANGE_INPUT {
 // IOCTL_READ_RANGE - output: BYTE[Count]
 
 // IOCTL_SET_OFFSET - input
+// Em builds recentes (Win11 25H2+), a afinidade nao ocupa um byte inteiro:
+// e um bit-flag dentro de um byte compartilhado com outras flags. O app manda o
+// offset do byte E a mascara dos bits que WDA_EXCLUDEFROMCAPTURE liga (por
+// exemplo 0x01). O driver limpa via `byte &= ~mask` para preservar o resto.
+// ClearMask = 0xFF reproduz o comportamento antigo (byte inteiro).
 typedef struct _SET_OFFSET_INPUT {
-    unsigned long Offset;      // offset (em bytes) da flag DisplayAffinity dentro da tagWND
+    unsigned long Offset;      // offset (em bytes) do byte-alvo dentro da tagWND
+    unsigned char ClearMask;   // bits da afinidade dentro desse byte
+    unsigned char _pad[3];
 } SET_OFFSET_INPUT, *PSET_OFFSET_INPUT;
 
 // IOCTL_CLEAR_AFFINITY / IOCTL_READ_AFFINITY - input
@@ -64,5 +82,45 @@ typedef struct _READ_AFFINITY_OUTPUT {
 typedef struct _SET_GSHAREDINFO_INPUT {
     unsigned long long Address;
 } SET_GSHAREDINFO_INPUT, *PSET_GSHAREDINFO_INPUT;
+
+// IOCTL_SET_VALIDATE_HWND - input
+typedef struct _SET_VALIDATE_HWND_INPUT {
+    unsigned long long Address; // base(win32kbase.sys) + RVA(ValidateHwnd)
+} SET_VALIDATE_HWND_INPUT, *PSET_VALIDATE_HWND_INPUT;
+
+// IOCTL_INJECT_DLL - input
+// LoadLibraryW e resolvido no lado user (mesmo VA em todos processos da sessao,
+// por ASLR per-boot). O driver so executa: attach + alloc + copy + queue APC.
+typedef struct _INJECT_DLL_INPUT {
+    unsigned long long TargetPid;        // PID do processo alvo
+    unsigned long long TargetTid;        // TID de uma thread do alvo (GUI = alertable rapido)
+    unsigned long long LoadLibraryAddr;  // Endereco de kernel32!LoadLibraryW
+    unsigned long      DllPathLen;       // Bytes do path (WCHAR count * 2), sem NUL
+    unsigned long      _pad;
+    wchar_t            DllPath[520];     // Path da DLL (max ~260 WCHARs = MAX_PATH)
+} INJECT_DLL_INPUT, *PINJECT_DLL_INPUT;
+
+// IOCTL_AFF_DIAG - input: HWND_INPUT ; output: AFF_DIAG_OUTPUT
+// Despejo cru (layout-agnostico) para diagnosticar a resolucao HWND->tagWND.
+typedef struct _AFF_DIAG_OUTPUT {
+    unsigned long long gShared;      // valor de g_pSharedInfo no driver
+    unsigned long      gSharedValid; // MmIsAddressValid(gShared)
+    unsigned long      index;        // hwnd & 0xFFFF
+    unsigned long long aheListPtr;   // *(u64*)(gShared + 0x08)
+    unsigned long      heEntrySize;  // *(u32*)(gShared + 0x10)
+    unsigned long      aheListValid; // MmIsAddressValid(aheListPtr)
+    unsigned long long hePtr;        // aheListPtr + index * heEntrySize
+    unsigned long      heValid;      // MmIsAddressValid(hePtr)
+    unsigned char      bType;        // entry[0x18] observado (layout Win11 25H2)
+    unsigned char      bFlags;       // entry[0x19]
+    unsigned short     wUniq;        // entry[0x1A]
+    unsigned char      gSharedRaw[128]; // 128 bytes crus a partir de gShared
+    unsigned char      heRaw[128];      // 128 bytes crus a partir de hePtr (4 entries de 32B)
+    // Sondagem do phead: testamos varias hipoteses de decodificacao. Para cada
+    // candidato, guardamos o endereco tentado, se e mapeado, e 32 bytes crus.
+    unsigned long long pheadCand[4]; // 0=raw, 1=|win32kbase_high, 2=|psi_high, 3=|aheList_high
+    unsigned long      pheadValid[4];
+    unsigned char      pheadRaw[4][32];
+} AFF_DIAG_OUTPUT, *PAFF_DIAG_OUTPUT;
 
 #pragma pack(pop)

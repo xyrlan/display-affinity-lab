@@ -19,7 +19,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
-    <PlatformToolset>v143</PlatformToolset>
+    <PlatformToolset>v145</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
     <UseDebugLibraries Condition="'$(Configuration)'=='Debug'">true</UseDebugLibraries>
     <UseDebugLibraries Condition="'$(Configuration)'=='Release'">false</UseDebugLibraries>
@@ -31,6 +31,9 @@
       <AdditionalIncludeDirectories>$(ProjectDir)..\shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
+      <!-- Runtime C++ estatico: exe roda em qualquer Windows sem VC++ Redist. -->
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
@@ -45,6 +48,7 @@
     <ClCompile Include="BmpCapture.cpp" />
     <ClCompile Include="PdbResolver.cpp" />
     <ClCompile Include="ModuleBase.cpp" />
+    <ClCompile Include="Injector.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DriverComm.hpp" />
@@ -53,6 +57,7 @@
     <ClInclude Include="BmpCapture.hpp" />
     <ClInclude Include="PdbResolver.hpp" />
     <ClInclude Include="ModuleBase.hpp" />
+    <ClInclude Include="Injector.hpp" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

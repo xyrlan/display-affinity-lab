@@ -13,6 +13,12 @@ namespace affctl {
 // Retorna STATUS_INVALID_PARAMETER se addr for nulo/invalido.
 NTSTATUS SetSharedInfoAddress(PVOID addr);
 
+// Recebe o endereco absoluto de win32kbase!ValidateHwnd (resolvido pelo app via
+// PDB). Prioridade sobre o caminho aheList.phead — a Microsoft escondeu phead da
+// HANDLEENTRY publica em builds recentes; ValidateHwnd continua sendo o
+// resolvedor oficial HWND->PWND.
+NTSTATUS SetValidateHwndAddress(PVOID addr);
+
 // Valida se gSharedInfo ja foi configurado. STATUS_SUCCESS se sim,
 // STATUS_INVALID_DEVICE_STATE se ainda nao.
 NTSTATUS InitSharedInfo();
@@ -28,7 +34,12 @@ NTSTATUS ReadTagWndRange(ULONG_PTR hwnd, PVOID out, ULONG count);
 // Le 1 byte no 'offset' da tagWND para *value. Guardado por SEH.
 NTSTATUS ReadFlag(ULONG_PTR hwnd, ULONG offset, unsigned char* value);
 
-// Escreve 0x00 (WDA_NONE) no 'offset' da tagWND. Guardado por SEH.
-NTSTATUS ClearFlag(ULONG_PTR hwnd, ULONG offset);
+// Limpa os bits de 'mask' no byte em 'offset' da tagWND (byte &= ~mask).
+// mask=0xFF equivale a zerar o byte todo (comportamento antigo). Guardado por SEH.
+NTSTATUS ClearFlag(ULONG_PTR hwnd, ULONG offset, unsigned char mask);
+
+// Diagnostico: preenche AFF_DIAG_OUTPUT (passado como void*) com despejo cru de
+// gSharedInfo e da entrada de handle calculada. Layout-agnostico, guardado por SEH.
+NTSTATUS Diag(ULONG_PTR hwnd, void* out);
 
 } // namespace affctl

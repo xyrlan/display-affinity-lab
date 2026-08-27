@@ -5,6 +5,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <vector>
 
 class PdbResolver {
 public:
@@ -20,6 +21,12 @@ public:
     // Retorna o RVA (offset relativo a base do modulo) do simbolo pedido.
     // Lanca std::runtime_error se o simbolo nao existir no PDB.
     uint32_t rvaOf(const char* symbol) const;
+
+    struct SymHit { std::string name; uint32_t rva; uint32_t size; };
+    // Enumera simbolos que casam com 'mask' (wildcards *, ?). Util pra medir
+    // "riqueza" do PDB (ex: probe de dwmcore.dll para achar campos/metodos de
+    // capture-exclusion). Retorna todos os hits (sem cap; caller filtra).
+    std::vector<SymHit> enumSymbols(const char* mask) const;
 
 private:
     void*    m_hProcess = nullptr;   // pseudo-handle para SymInitialize

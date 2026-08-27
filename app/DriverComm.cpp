@@ -64,15 +64,39 @@ std::vector<uint8_t> DriverComm::readRange(HWND hwnd, uint32_t count) {
     return out;
 }
 
+void DriverComm::injectDll(const INJECT_DLL_INPUT& in) {
+    // Copia local para tirar o const p/ a assinatura non-const de DeviceIoControl.
+    INJECT_DLL_INPUT local = in;
+    ioctl(IOCTL_INJECT_DLL, &local, sizeof(local), nullptr, 0, nullptr);
+}
+
+AFF_DIAG_OUTPUT DriverComm::diag(HWND hwnd) {
+    HWND_INPUT in{};
+    in.Hwnd = reinterpret_cast<unsigned long long>(hwnd);
+    AFF_DIAG_OUTPUT out{};
+    ioctl(IOCTL_AFF_DIAG,
+          &in, sizeof(in),
+          &out, sizeof(out),
+          nullptr);
+    return out;
+}
+
 void DriverComm::setSharedInfoAddr(uint64_t addr) {
     SET_GSHAREDINFO_INPUT in{};
     in.Address = addr;
     ioctl(IOCTL_SET_GSHAREDINFO_ADDR, &in, sizeof(in), nullptr, 0, nullptr);
 }
 
-void DriverComm::setOffset(uint32_t offset) {
+void DriverComm::setValidateHwndAddr(uint64_t addr) {
+    SET_VALIDATE_HWND_INPUT in{};
+    in.Address = addr;
+    ioctl(IOCTL_SET_VALIDATE_HWND, &in, sizeof(in), nullptr, 0, nullptr);
+}
+
+void DriverComm::setOffset(uint32_t offset, uint8_t clearMask) {
     SET_OFFSET_INPUT in{};
-    in.Offset = offset;
+    in.Offset    = offset;
+    in.ClearMask = clearMask;
     ioctl(IOCTL_SET_OFFSET, &in, sizeof(in), nullptr, 0, nullptr);
 }
 
