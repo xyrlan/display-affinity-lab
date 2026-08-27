@@ -18,6 +18,13 @@
     <RootNamespace>affctl</RootNamespace>
     <TargetName>affctl</TargetName>
   </PropertyGroup>
+  <!-- Ancora output em $(ProjectDir) (a propria pasta do vcxproj) em vez de
+       $(SolutionDir), que varia com a .sln aberta. Garante affctl.sys sempre
+       em driver\x64\<Config>\ independente da solucao. -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <TargetVersion>Windows10</TargetVersion>
@@ -27,6 +34,12 @@
     <ConfigurationType>Driver</ConfigurationType>
     <DriverType>WDM</DriverType>
     <SpectreMitigation>false</SpectreMitigation>
+    <!-- Desabilita test-signing automatico do WDK (Inf2Cat + SignTool).
+         O sys sai nao-assinado; funciona em maquina com "bcdedit /set
+         testsigning on". Para producao a assinatura sera feita externamente
+         com o EV cert via signtool.exe manual (ou via pipeline de release). -->
+    <SignMode>Off</SignMode>
+    <EnableInf2cat>False</EnableInf2cat>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ItemGroup>

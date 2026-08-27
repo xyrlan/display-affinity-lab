@@ -16,6 +16,14 @@
     <TargetName>affapp</TargetName>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
+  <!-- Ancora output em $(ProjectDir) (a propria pasta do vcxproj) em vez de
+       depender de $(SolutionDir), que muda dependendo de qual .sln abriu.
+       Garante que affapp.exe sempre saia em app\x64\<Config>\ independente
+       da solucao. -->
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)$(Platform)\$(Configuration)\</IntDir>
+  </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
@@ -31,6 +39,10 @@
       <AdditionalIncludeDirectories>$(ProjectDir)..\shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
+      <!-- _CRT_SECURE_NO_WARNINGS: silencia C4996 (fopen/strcpy/etc "unsafe").
+           Nao vamos migrar pra fopen_s no legacy do main.cpp; a API C classica
+           esta sendo usada com validacao propria. -->
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <!-- Runtime C++ estatico: exe roda em qualquer Windows sem VC++ Redist. -->
       <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>

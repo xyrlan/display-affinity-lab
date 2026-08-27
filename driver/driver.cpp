@@ -4,9 +4,9 @@
 // a logica interna (tagwnd.cpp) e C++.
 //
 // Hardening de acesso:
-//   - Device criado via IoCreateDeviceSecure com SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_NONE.
-//     Somente processos rodando como SYSTEM (full) ou Administrator (RWX) podem
-//     abrir handle para \\.\AffCtl. Usuarios comuns recebem ACCESS_DENIED no
+//   - Device criado via IoCreateDeviceSecure com SDDL_DEVOBJ_SYS_ALL_ADM_ALL.
+//     Somente processos rodando como SYSTEM ou Administrator podem abrir
+//     handle para \\.\AffCtl. Usuarios comuns recebem ACCESS_DENIED no
 //     CreateFileW — o driver NAO pode ser abusado por processos de baixo
 //     privilegio (mitigacao BYOVD).
 //   - IOCTLs de diagnostico (READ_RANGE, AFF_DIAG) so existem em builds
@@ -392,13 +392,15 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     UNICODE_STRING devName;
     RtlInitUnicodeString(&devName, AFFCTL_DEVICE_NAME);
 
-    // SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_NONE:
-    //   SYSTEM = GENERIC_ALL, Administrators = GENERIC_READ|WRITE|EXECUTE,
-    //   todos os demais = negado. Bloqueia a superficie de abuso BYOVD:
-    //   usuarios comuns nao conseguem abrir handle pra enviar IOCTL_INJECT_DLL
-    //   ou ler memoria kernel.
-    UNICODE_STRING sddl;
-    RtlInitUnicodeString(&sddl, SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_NONE);
+    // SDDL_DEVOBJ_SYS_ALL_ADM_ALL:
+    //   SYSTEM = GENERIC_ALL, Administrators = GENERIC_ALL,
+    //   todos os demais = negado (a SDDL nao lista ninguem mais). Bloqueia a
+    //   superficie de abuso BYOVD: usuarios comuns nao conseguem abrir handle
+    //   pra enviar IOCTL_INJECT_DLL ou ler memoria kernel.
+    //
+    // Nota: as constantes SDDL_DEVOBJ_* em wdmsec.h sao declaradas via
+    // DECLARE_CONST_UNICODE_STRING — ja sao UNICODE_STRING prontas, passa-se
+    // o endereco direto (nao precisa de RtlInitUnicodeString).
     NTSTATUS status = IoCreateDeviceSecure(
         DriverObject,
         0,
@@ -406,7 +408,7 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
         FILE_DEVICE_UNKNOWN,
         FILE_DEVICE_SECURE_OPEN,
         FALSE,
-        &sddl,
+        &SDDL_DEVOBJ_SYS_ALL_ADM_ALL,
         (LPCGUID)&GUID_DEVCLASS_AFFCTL,
         &g_deviceObject);
     if (!NT_SUCCESS(status)) {
