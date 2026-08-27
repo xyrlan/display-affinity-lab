@@ -110,6 +110,7 @@ PVOID ResolveTagWnd(ULONG_PTR hwnd) {
     return result;
 }
 
+#ifdef AFFCTL_DIAG_IOCTLS
 NTSTATUS ReadTagWndRange(ULONG_PTR hwnd, PVOID out, ULONG count) {
     if (out == nullptr || count == 0 || count > AFFCTL_MAX_RANGE) {
         return STATUS_INVALID_PARAMETER;
@@ -134,6 +135,7 @@ NTSTATUS ReadTagWndRange(ULONG_PTR hwnd, PVOID out, ULONG count) {
     }
     return status;
 }
+#endif // AFFCTL_DIAG_IOCTLS
 
 NTSTATUS ReadFlag(ULONG_PTR hwnd, ULONG offset, unsigned char* value) {
     if (value == nullptr || offset >= AFFCTL_MAX_RANGE) {
@@ -184,6 +186,7 @@ NTSTATUS ClearFlag(ULONG_PTR hwnd, ULONG offset, unsigned char mask) {
     return status;
 }
 
+#ifdef AFFCTL_DIAG_IOCTLS
 NTSTATUS Diag(ULONG_PTR hwnd, void* out) {
     if (out == nullptr) {
         return STATUS_INVALID_PARAMETER;
@@ -261,5 +264,6 @@ NTSTATUS Diag(ULONG_PTR hwnd, void* out) {
 
     return STATUS_SUCCESS;
 }
+#endif // AFFCTL_DIAG_IOCTLS
 
 } // namespace affctl

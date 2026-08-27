@@ -69,8 +69,28 @@ NTKERNELAPI BOOLEAN NTAPI KeInsertQueueApc(
 
 namespace {
 
-// Rotina kernel-mode: chamada ANTES da rotina normal (LoadLibraryW). Aqui
-// liberamos a KAPC alocada — KeInsertQueueApc nao libera automaticamente.
+// Estende KAPC com metadados de ownership. `apc` precisa ser o PRIMEIRO membro
+// — o kernel opera sobre o ponteiro dele (PKAPC), e recuperamos o AffctlApc
+// via CONTAINING_RECORD dentro das rotinas.
+//
+// ownerProc / ownedBuffer:
+//   - Se non-null, esta APC e dona do `ownedBuffer` (alocado com
+//     ZwAllocateVirtualMemory no VA space de `ownerProc`). Na rundown routine,
+//     fazemos attach ao processo e ZwFreeVirtualMemory para nao deixar a VA
+//     do alvo com um buffer orfao caso a thread morra antes da APC disparar.
+//   - Se null, o buffer e compartilhado com outras APCs (path watched — mesmo
+//     buffer serve varias threads do mesmo processo). Nao liberamos aqui;
+//     a VA some naturalmente com o processo alvo.
+struct AffctlApc {
+    KAPC      apc;
+    PEPROCESS ownerProc;
+    PVOID     ownedBuffer;
+};
+
+// Rotina kernel-mode: chamada ANTES da rotina normal (LoadLibraryW), no
+// contexto do processo alvo. A APC vai disparar normalmente — LoadLibraryW le
+// o buffer em seguida — entao NAO liberamos ownedBuffer aqui (ele fica na VA
+// do processo alvo ate a morte natural do processo).
 VOID InjectApcKernelRoutine(
     PKAPC Apc,
     PKNORMAL_ROUTINE* /*NormalRoutine*/,
@@ -78,22 +98,127 @@ VOID InjectApcKernelRoutine(
     PVOID* /*SystemArgument1*/,
     PVOID* /*SystemArgument2*/)
 {
-    if (Apc != nullptr) {
-        ExFreePoolWithTag(Apc, AFFCTL_APC_TAG);
+    if (Apc == nullptr) return;
+    auto* aa = CONTAINING_RECORD(Apc, AffctlApc, apc);
+    if (aa->ownerProc) {
+        ObDereferenceObject(aa->ownerProc);
     }
+    ExFreePoolWithTag(aa, AFFCTL_APC_TAG);
 }
 
 // Rotina de rundown: chamada se a thread alvo morrer antes da APC disparar.
+// LoadLibraryW nao rodou — se somos donos do buffer, tentamos liberar dentro
+// da VA do processo alvo antes de largar a referencia. Se o processo alvo
+// tambem estiver terminando (comum quando a thread do EntryPoint morre com
+// o processo), attach/free podem falhar — o __try/__except cobre esse caso
+// e o buffer some com a VA do processo de qualquer forma.
 VOID InjectApcRundownRoutine(PKAPC Apc)
 {
-    if (Apc != nullptr) {
-        ExFreePoolWithTag(Apc, AFFCTL_APC_TAG);
+    if (Apc == nullptr) return;
+    auto* aa = CONTAINING_RECORD(Apc, AffctlApc, apc);
+    if (aa->ownerProc && aa->ownedBuffer) {
+        __try {
+            KAPC_STATE apcState;
+            KeStackAttachProcess(aa->ownerProc, &apcState);
+            SIZE_T zero = 0;
+            ZwFreeVirtualMemory(
+                ZwCurrentProcess(), &aa->ownedBuffer, &zero, MEM_RELEASE);
+            KeUnstackDetachProcess(&apcState);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            // Processo alvo provavelmente esta terminando — VA sera descartada.
+        }
     }
+    if (aa->ownerProc) {
+        ObDereferenceObject(aa->ownerProc);
+    }
+    ExFreePoolWithTag(aa, AFFCTL_APC_TAG);
 }
 
 } // namespace
 
 namespace affctl {
+
+NTSTATUS AllocRemotePathBuffer(
+    PEPROCESS process, PCWSTR dllPath, SIZE_T dllPathBytes, PVOID* outRemoteBuf)
+{
+    if (!process || !dllPath || dllPathBytes == 0 || !outRemoteBuf) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    *outRemoteBuf = nullptr;
+
+    KAPC_STATE apcState;
+    KeStackAttachProcess(process, &apcState);
+
+    PVOID  buf  = nullptr;
+    SIZE_T size = dllPathBytes + sizeof(WCHAR);
+    NTSTATUS status = ZwAllocateVirtualMemory(
+        ZwCurrentProcess(), &buf, 0, &size,
+        MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+    if (NT_SUCCESS(status)) {
+        __try {
+            RtlCopyMemory(buf, dllPath, dllPathBytes);
+            ((PWCHAR)buf)[dllPathBytes / sizeof(WCHAR)] = L'\0';
+            *outRemoteBuf = buf;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            SIZE_T freeSize = 0;
+            ZwFreeVirtualMemory(ZwCurrentProcess(), &buf, &freeSize, MEM_RELEASE);
+            status = STATUS_ACCESS_VIOLATION;
+        }
+    }
+
+    KeUnstackDetachProcess(&apcState);
+    return status;
+}
+
+NTSTATUS QueueLoadLibraryApc(
+    PETHREAD  thread,
+    PVOID     loadLibraryAddr,
+    PVOID     remotePathBuf,
+    PEPROCESS ownerProcess)
+{
+    if (!thread || !loadLibraryAddr || !remotePathBuf) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    auto* aa = (AffctlApc*)ExAllocatePool2(
+        POOL_FLAG_NON_PAGED, sizeof(AffctlApc), AFFCTL_APC_TAG);
+    if (!aa) return STATUS_INSUFFICIENT_RESOURCES;
+
+    // Ownership do buffer: se caller passou ownerProcess, referenciamos aqui
+    // pra manter EPROCESS vivo caso a rundown precise fazer attach depois.
+    // A referencia e devolvida em InjectApcKernelRoutine ou InjectApcRundownRoutine.
+    if (ownerProcess) {
+        ObReferenceObject(ownerProcess);
+        aa->ownerProc   = ownerProcess;
+        aa->ownedBuffer = remotePathBuf;
+    } else {
+        aa->ownerProc   = nullptr;
+        aa->ownedBuffer = nullptr; // buffer compartilhado — nao libera aqui
+    }
+
+    KeInitializeApc(
+        &aa->apc,
+        (PRKTHREAD)thread,
+        OriginalApcEnvironment,
+        InjectApcKernelRoutine,
+        InjectApcRundownRoutine,
+        (PKNORMAL_ROUTINE)loadLibraryAddr,
+        UserMode,
+        remotePathBuf);
+
+    BOOLEAN inserted = KeInsertQueueApc(&aa->apc, nullptr, nullptr, IO_NO_INCREMENT);
+    if (!inserted) {
+        // Nenhuma rotina vai rodar — desfazemos ownership manualmente.
+        if (aa->ownerProc) {
+            ObDereferenceObject(aa->ownerProc);
+        }
+        ExFreePoolWithTag(aa, AFFCTL_APC_TAG);
+        return STATUS_UNSUCCESSFUL;
+    }
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS InjectDll(
     HANDLE pid,
@@ -134,83 +259,27 @@ NTSTATUS InjectDll(
         return STATUS_INVALID_PARAMETER;
     }
 
-    // Attach ao contexto do alvo (PASSIVE_LEVEL requerido).
-    KAPC_STATE apcState;
-    KeStackAttachProcess(targetProc, &apcState);
-
-    // Aloca buffer read-write no espaco do alvo p/ o path da DLL. Precisamos
-    // de espaco pro NUL terminator porque LoadLibraryW espera WCHAR-string.
-    PVOID  remoteBuf  = nullptr;
-    SIZE_T bufSize    = dllPathBytes + sizeof(WCHAR);
-    status = ZwAllocateVirtualMemory(
-        ZwCurrentProcess(),
-        &remoteBuf,
-        0,
-        &bufSize,
-        MEM_COMMIT | MEM_RESERVE,
-        PAGE_READWRITE);
-
+    // 1) Aloca + copia o path no espaco do alvo.
+    PVOID remoteBuf = nullptr;
+    status = AllocRemotePathBuffer(targetProc, dllPath, dllPathBytes, &remoteBuf);
     if (!NT_SUCCESS(status)) {
-        KeUnstackDetachProcess(&apcState);
         ObDereferenceObject(targetThread);
         ObDereferenceObject(targetProc);
         return status;
     }
 
-    // Copia o path (protegido por SEH — remoteBuf e ponteiro user-mode).
-    __try {
-        RtlCopyMemory(remoteBuf, dllPath, dllPathBytes);
-        // NUL-terminador logo apos os bytes copiados.
-        ((PWCHAR)remoteBuf)[dllPathBytes / sizeof(WCHAR)] = L'\0';
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        SIZE_T freeSize = 0;
-        ZwFreeVirtualMemory(ZwCurrentProcess(), &remoteBuf, &freeSize, MEM_RELEASE);
-        KeUnstackDetachProcess(&apcState);
-        ObDereferenceObject(targetThread);
-        ObDereferenceObject(targetProc);
-        return STATUS_ACCESS_VIOLATION;
-    }
+    // 2) Enfileira APC user-mode com LoadLibraryW. Passamos targetProc como
+    //    owner do buffer — a rundown routine libera o buffer se a thread morrer
+    //    antes da APC disparar (ela referencia targetProc internamente, alem
+    //    da referencia local que soltamos abaixo).
+    status = QueueLoadLibraryApc(targetThread, loadLibraryAddr, remoteBuf, targetProc);
+    // Se KeInsertQueueApc falhou dentro de QueueLoadLibraryApc, a APC nao vai
+    // rodar — nem a rundown. O buffer remoto vira leak minusculo (< 1KB) na
+    // VA do processo alvo, que some quando ele morrer. Aceitavel.
 
-    // Sai do contexto do alvo antes de alocar/inserir a APC (evita segurar
-    // attach mais do que o necessario).
-    KeUnstackDetachProcess(&apcState);
-
-    // A KAPC precisa vir de non-paged pool (a APC pode ser processada em
-    // DISPATCH_LEVEL enquanto e removida da fila).
-    PKAPC apc = (PKAPC)ExAllocatePool2(
-        POOL_FLAG_NON_PAGED, sizeof(KAPC), AFFCTL_APC_TAG);
-    if (apc == nullptr) {
-        // remoteBuf fica alocado no alvo — leak minusculo (< 1KB) e aceitavel
-        // para uma falha de alocacao rara. Retornamos erro claro.
-        ObDereferenceObject(targetThread);
-        ObDereferenceObject(targetProc);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    KeInitializeApc(
-        apc,
-        (PRKTHREAD)targetThread,
-        OriginalApcEnvironment,
-        InjectApcKernelRoutine,
-        InjectApcRundownRoutine,
-        (PKNORMAL_ROUTINE)loadLibraryAddr,
-        UserMode,
-        remoteBuf);
-
-    BOOLEAN inserted = KeInsertQueueApc(apc, nullptr, nullptr, IO_NO_INCREMENT);
-    if (!inserted) {
-        ExFreePoolWithTag(apc, AFFCTL_APC_TAG);
-        ObDereferenceObject(targetThread);
-        ObDereferenceObject(targetProc);
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    // Sucesso: as refs sobem +1 por PsLookup*; agora liberamos. A KAPC/buffer
-    // remoto sao geridos pelo kernel/rundown.
     ObDereferenceObject(targetThread);
     ObDereferenceObject(targetProc);
-    return STATUS_SUCCESS;
+    return status;
 }
 
 } // namespace affctl

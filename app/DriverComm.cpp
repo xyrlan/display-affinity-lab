@@ -70,6 +70,52 @@ void DriverComm::injectDll(const INJECT_DLL_INPUT& in) {
     ioctl(IOCTL_INJECT_DLL, &local, sizeof(local), nullptr, 0, nullptr);
 }
 
+void DriverComm::watchName(const wchar_t* imageName,
+                           const wchar_t* dllPath,
+                           uint64_t       loadLibraryAddr) {
+    WATCH_NAME_INPUT in{};
+    size_t nameChars = wcslen(imageName);
+    size_t pathChars = wcslen(dllPath);
+    if (nameChars >= AFFCTL_MAX_IMAGE_NAME) {
+        throw std::runtime_error("imageName excede AFFCTL_MAX_IMAGE_NAME");
+    }
+    if (pathChars * sizeof(wchar_t) > sizeof(in.DllPath) - sizeof(wchar_t)) {
+        throw std::runtime_error("dllPath excede buffer do IOCTL");
+    }
+    memcpy(in.ImageName, imageName, nameChars * sizeof(wchar_t));
+    memcpy(in.DllPath,   dllPath,   pathChars * sizeof(wchar_t));
+    in.ImageNameLen    = static_cast<unsigned long>(nameChars * sizeof(wchar_t));
+    in.DllPathLen      = static_cast<unsigned long>(pathChars * sizeof(wchar_t));
+    in.LoadLibraryAddr = loadLibraryAddr;
+    ioctl(IOCTL_WATCH_NAME, &in, sizeof(in), nullptr, 0, nullptr);
+}
+
+void DriverComm::unwatchName(const wchar_t* imageName) {
+    UNWATCH_NAME_INPUT in{};
+    size_t chars = wcslen(imageName);
+    if (chars >= AFFCTL_MAX_IMAGE_NAME) {
+        throw std::runtime_error("imageName excede AFFCTL_MAX_IMAGE_NAME");
+    }
+    memcpy(in.ImageName, imageName, chars * sizeof(wchar_t));
+    in.ImageNameLen = static_cast<unsigned long>(chars * sizeof(wchar_t));
+    ioctl(IOCTL_UNWATCH_NAME, &in, sizeof(in), nullptr, 0, nullptr);
+}
+
+uint32_t DriverComm::resolvePidByName(const wchar_t* imageName) {
+    RESOLVE_PID_INPUT  in{};
+    RESOLVE_PID_OUTPUT out{};
+    size_t chars = wcslen(imageName);
+    if (chars >= AFFCTL_MAX_IMAGE_NAME) {
+        throw std::runtime_error("imageName excede AFFCTL_MAX_IMAGE_NAME");
+    }
+    memcpy(in.ImageName, imageName, chars * sizeof(wchar_t));
+    in.ImageNameLen = static_cast<unsigned long>(chars * sizeof(wchar_t));
+    ioctl(IOCTL_RESOLVE_PID_BY_NAME,
+          &in, sizeof(in), &out, sizeof(out), nullptr);
+    // PID fits em 32 bits em qualquer Windows atual.
+    return static_cast<uint32_t>(out.Pid & 0xFFFFFFFFu);
+}
+
 AFF_DIAG_OUTPUT DriverComm::diag(HWND hwnd) {
     HWND_INPUT in{};
     in.Hwnd = reinterpret_cast<unsigned long long>(hwnd);

@@ -37,7 +37,8 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>user32.lib;gdi32.lib;dbghelp.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <!-- advapi32.lib: RegOpenKeyEx/RegSetValueEx (OffsetCache no Registry). -->
+      <AdditionalDependencies>user32.lib;gdi32.lib;dbghelp.lib;psapi.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -49,6 +50,7 @@
     <ClCompile Include="PdbResolver.cpp" />
     <ClCompile Include="ModuleBase.cpp" />
     <ClCompile Include="Injector.cpp" />
+    <ClCompile Include="OffsetCache.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DriverComm.hpp" />
@@ -58,6 +60,7 @@
     <ClInclude Include="PdbResolver.hpp" />
     <ClInclude Include="ModuleBase.hpp" />
     <ClInclude Include="Injector.hpp" />
+    <ClInclude Include="OffsetCache.hpp" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -26,4 +26,34 @@ NTSTATUS InjectDll(
     PCWSTR dllPath,
     SIZE_T dllPathBytes);
 
+// Aloca buffer no espaco de enderecos do `process` (assume-se PASSIVE_LEVEL e
+// que o caller pode chamar KeStackAttachProcess). Retorna o ponteiro remoto
+// (valido no contexto do alvo) em *outRemoteBuf.
+NTSTATUS AllocRemotePathBuffer(
+    PEPROCESS process,
+    PCWSTR    dllPath,
+    SIZE_T    dllPathBytes,
+    PVOID*    outRemoteBuf);
+
+// Enfileira APC UserMode em `thread` executando `loadLibraryAddr(remotePathBuf)`.
+// A KAPC (encapsulada em AffctlApc, veja inject.cpp) vai de NonPagedPool e e
+// liberada na KernelRoutine (dispatch normal) ou na RundownRoutine (thread
+// morreu antes da APC disparar).
+//
+// ownerProcess:
+//   - nullptr  = caller compartilha o `remotePathBuf` entre multiplas APCs
+//                (path watched — buffer vive com o processo alvo).
+//   - non-null = caller transfere ownership do buffer para a APC. Se a thread
+//                morrer antes da APC disparar, a RundownRoutine faz attach ao
+//                processo e libera `remotePathBuf` via ZwFreeVirtualMemory
+//                antes de largar a referencia. O caller NAO precisa (e nao
+//                deve) fazer ObReferenceObject/Dereference — QueueLoadLibraryApc
+//                assume a referencia internamente e a solta na kernel routine
+//                ou na rundown routine.
+NTSTATUS QueueLoadLibraryApc(
+    PETHREAD  thread,
+    PVOID     loadLibraryAddr,
+    PVOID     remotePathBuf,
+    PEPROCESS ownerProcess);
+
 } // namespace affctl

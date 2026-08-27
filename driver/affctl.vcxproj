@@ -33,11 +33,13 @@
     <ClCompile Include="driver.cpp" />
     <ClCompile Include="tagwnd.cpp" />
     <ClCompile Include="inject.cpp" />
+    <ClCompile Include="process_notify.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="tagwnd.h" />
     <ClInclude Include="win32k_structs.h" />
     <ClInclude Include="inject.h" />
+    <ClInclude Include="process_notify.h" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <ItemGroup>
@@ -48,6 +50,22 @@
       <AdditionalIncludeDirectories>$(ProjectDir)..\shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>false</TreatWarningAsError>
+    </ClCompile>
+    <Link>
+      <!-- /INTEGRITYCHECK: exigido por PsSetCreateProcessNotifyRoutineEx.
+           Sem isso a API retorna STATUS_ACCESS_DENIED em tempo de execucao. -->
+      <AdditionalOptions>/INTEGRITYCHECK %(AdditionalOptions)</AdditionalOptions>
+      <!-- wdmsec.lib: IoCreateDeviceSecure + SDDL constants (SDDL_DEVOBJ_*). -->
+      <AdditionalDependencies>wdmsec.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <!-- Debug-only: expoe IOCTL_READ_RANGE e IOCTL_AFF_DIAG (usados p/ descobrir
+       offset da flag DisplayAffinity durante desenvolvimento). Em Release
+       esses IOCTLs sao compilados fora — dispatch retorna
+       STATUS_INVALID_DEVICE_REQUEST se algum caller tentar chamar. -->
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <PreprocessorDefinitions>AFFCTL_DIAG_IOCTLS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

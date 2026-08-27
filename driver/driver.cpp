@@ -2,10 +2,30 @@
 // affctl.sys — DriverEntry, dispatch de IOCTL e Unload.
 // As rotinas de entrada exigidas pelo kernel usam extern "C" (ABI C);
 // a logica interna (tagwnd.cpp) e C++.
+//
+// Hardening de acesso:
+//   - Device criado via IoCreateDeviceSecure com SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_NONE.
+//     Somente processos rodando como SYSTEM (full) ou Administrator (RWX) podem
+//     abrir handle para \\.\AffCtl. Usuarios comuns recebem ACCESS_DENIED no
+//     CreateFileW — o driver NAO pode ser abusado por processos de baixo
+//     privilegio (mitigacao BYOVD).
+//   - IOCTLs de diagnostico (READ_RANGE, AFF_DIAG) so existem em builds
+//     Debug (definida AFFCTL_DIAG_IOCTLS pelo vcxproj). Em Release, o
+//     dispatch retorna STATUS_INVALID_DEVICE_REQUEST — remove info-leak
+//     de estruturas kernel adjacentes.
+#include <initguid.h>   // permite alocar storage do GUID de classe abaixo
 #include <ntddk.h>
+#include <wdmsec.h>     // IoCreateDeviceSecure, SDDL_DEVOBJ_*
 #include "tagwnd.h"
 #include "inject.h"
+#include "process_notify.h"
 #include "../shared/affctl_shared.h"
+
+// GUID de classe do device (privado deste driver). Nao esta associado a nenhum
+// setup class publico da MSFT — e apenas o argumento DeviceClassGuid exigido
+// por IoCreateDeviceSecure para agrupar objetos criados por este driver.
+DEFINE_GUID(GUID_DEVCLASS_AFFCTL,
+    0xA1B2C3D5, 0x0002, 0x4A11, 0x9E, 0x22, 0xAF, 0xF0, 0xDA, 0x77, 0x10, 0x02);
 
 // Offset da flag DisplayAffinity na tagWND, descoberto pelo app (heuristica) e
 // enviado via IOCTL_SET_OFFSET. 0xFFFFFFFF = ainda nao configurado.
@@ -40,6 +60,69 @@ static bool OutputAtLeast(PIO_STACK_LOCATION s, ULONG n) {
     return s->Parameters.DeviceIoControl.OutputBufferLength >= n;
 }
 
+// Le HKLM\SYSTEM\CurrentControlSet\Services\<service>\Parameters\{Offset,ClearMask}
+// (DWORDs) e popula g_offset/g_clearMask. Silencioso se a subkey ou os valores
+// nao existirem — o app pode enviar IOCTL_SET_OFFSET a qualquer momento pra
+// setar manualmente. Isso permite ao affapp Release pular o discovery: uma vez
+// que a build Debug persistiu o offset via Registry, todo boot subsequente ja
+// carrega o driver pronto pra IOCTL_CLEAR_AFFINITY / IOCTL_READ_AFFINITY.
+static void LoadPersistedOffset(PUNICODE_STRING servicePath) {
+    // Constroi "<servicePath>\Parameters" num buffer local.
+    WCHAR paramsBuf[512];
+    UNICODE_STRING paramsPath;
+    paramsPath.Buffer        = paramsBuf;
+    paramsPath.Length        = 0;
+    paramsPath.MaximumLength = sizeof(paramsBuf);
+    if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&paramsPath, servicePath))) {
+        return;
+    }
+    UNICODE_STRING suffix;
+    RtlInitUnicodeString(&suffix, L"\\Parameters");
+    if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&paramsPath, &suffix))) {
+        return;
+    }
+
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(
+        &oa, &paramsPath,
+        OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+        nullptr, nullptr);
+    HANDLE hKey = nullptr;
+    NTSTATUS s = ZwOpenKey(&hKey, KEY_READ, &oa);
+    if (!NT_SUCCESS(s)) {
+        // Subkey ausente = primeiro boot pos-instalacao, sem discovery previo.
+        return;
+    }
+
+    // Buffer estatico para KeyValuePartialInformation + 1 DWORD de payload.
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+
+    auto readDword = [&](PCWSTR valueName, ULONG* outValue) -> bool {
+        UNICODE_STRING vname;
+        RtlInitUnicodeString(&vname, valueName);
+        ULONG needed = 0;
+        NTSTATUS r = ZwQueryValueKey(
+            hKey, &vname, KeyValuePartialInformation,
+            buf, sizeof(buf), &needed);
+        if (!NT_SUCCESS(r)) return false;
+        auto* kvp = reinterpret_cast<PKEY_VALUE_PARTIAL_INFORMATION>(buf);
+        if (kvp->Type != REG_DWORD || kvp->DataLength != sizeof(ULONG)) return false;
+        *outValue = *reinterpret_cast<PULONG>(kvp->Data);
+        return true;
+    };
+
+    ULONG offset = 0, mask = 0;
+    bool haveOffset = readDword(L"Offset",    &offset);
+    bool haveMask   = readDword(L"ClearMask", &mask);
+    ZwClose(hKey);
+
+    if (haveOffset && offset < AFFCTL_MAX_RANGE) {
+        g_offset    = offset;
+        // ClearMask e opcional — mask=0 (byte inteiro) equivale a 0xFF.
+        g_clearMask = (haveMask && mask) ? static_cast<UCHAR>(mask) : 0xFF;
+    }
+}
+
 static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -54,6 +137,10 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
     switch (code) {
 
+#ifdef AFFCTL_DIAG_IOCTLS
+    // DIAG (Debug-only): dump cru da tagWND pro user descobrir offset da flag
+    // DisplayAffinity. Compilado fora em Release — nao serve como primitiva
+    // de info-leak de estruturas kernel adjacentes.
     case IOCTL_READ_RANGE: {
         if (buffer == nullptr || !InputAtLeast(stack, sizeof(READ_RANGE_INPUT))) {
             status = STATUS_INVALID_PARAMETER;
@@ -74,6 +161,85 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         if (NT_SUCCESS(status)) {
             info = count;
         }
+        break;
+    }
+#endif // AFFCTL_DIAG_IOCTLS
+
+    case IOCTL_RESOLVE_PID_BY_NAME: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(RESOLVE_PID_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (!OutputAtLeast(stack, sizeof(RESOLVE_PID_OUTPUT))) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        auto rin = reinterpret_cast<PRESOLVE_PID_INPUT>(buffer);
+        const ULONG maxBytes =
+            (ULONG)(sizeof(rin->ImageName) - sizeof(wchar_t));
+        if (rin->ImageNameLen == 0 || rin->ImageNameLen > maxBytes ||
+            (rin->ImageNameLen % sizeof(wchar_t)) != 0) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        // Copia local + NUL termina (input user pode nao vir terminado).
+        wchar_t nameLocal[AFFCTL_MAX_IMAGE_NAME];
+        ULONG chars = rin->ImageNameLen / sizeof(wchar_t);
+        RtlCopyMemory(nameLocal, rin->ImageName, chars * sizeof(wchar_t));
+        nameLocal[chars] = L'\0';
+
+        HANDLE pid = affctl::ResolvePidByName(nameLocal);
+        auto out = reinterpret_cast<PRESOLVE_PID_OUTPUT>(buffer);
+        out->Pid = (unsigned long long)(ULONG_PTR)pid;
+        info = sizeof(RESOLVE_PID_OUTPUT);
+        status = STATUS_SUCCESS;
+        break;
+    }
+
+    case IOCTL_WATCH_NAME: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(WATCH_NAME_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        auto win = reinterpret_cast<PWATCH_NAME_INPUT>(buffer);
+        const ULONG maxNameBytes = (ULONG)(sizeof(win->ImageName) - sizeof(wchar_t));
+        const ULONG maxPathBytes = (ULONG)(sizeof(win->DllPath)   - sizeof(wchar_t));
+        if (win->ImageNameLen == 0 || win->ImageNameLen > maxNameBytes ||
+            (win->ImageNameLen % sizeof(wchar_t)) != 0 ||
+            win->DllPathLen == 0   || win->DllPathLen   > maxPathBytes ||
+            (win->DllPathLen % sizeof(wchar_t)) != 0 ||
+            win->LoadLibraryAddr == 0) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        wchar_t name[AFFCTL_MAX_IMAGE_NAME];
+        ULONG nameChars = win->ImageNameLen / sizeof(wchar_t);
+        RtlCopyMemory(name, win->ImageName, nameChars * sizeof(wchar_t));
+        name[nameChars] = L'\0';
+        win->DllPath[win->DllPathLen / sizeof(wchar_t)] = L'\0';
+        status = affctl::AddWatch(
+            name, win->DllPath, win->DllPathLen,
+            (PVOID)(ULONG_PTR)win->LoadLibraryAddr);
+        break;
+    }
+
+    case IOCTL_UNWATCH_NAME: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(UNWATCH_NAME_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        auto uin = reinterpret_cast<PUNWATCH_NAME_INPUT>(buffer);
+        const ULONG maxNameBytes = (ULONG)(sizeof(uin->ImageName) - sizeof(wchar_t));
+        if (uin->ImageNameLen == 0 || uin->ImageNameLen > maxNameBytes ||
+            (uin->ImageNameLen % sizeof(wchar_t)) != 0) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        wchar_t name[AFFCTL_MAX_IMAGE_NAME];
+        ULONG nameChars = uin->ImageNameLen / sizeof(wchar_t);
+        RtlCopyMemory(name, uin->ImageName, nameChars * sizeof(wchar_t));
+        name[nameChars] = L'\0';
+        status = affctl::RemoveWatch(name);
         break;
     }
 
@@ -109,6 +275,9 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         break;
     }
 
+#ifdef AFFCTL_DIAG_IOCTLS
+    // DIAG (Debug-only): dumpa gSharedInfo/HANDLEENTRY/phead-candidates.
+    // Compilado fora em Release para nao vazar layout de estruturas internas.
     case IOCTL_AFF_DIAG: {
         if (buffer == nullptr || !InputAtLeast(stack, sizeof(HWND_INPUT))) {
             status = STATUS_INVALID_PARAMETER;
@@ -125,6 +294,7 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
         }
         break;
     }
+#endif // AFFCTL_DIAG_IOCTLS
 
     case IOCTL_SET_GSHAREDINFO_ADDR: {
         if (buffer == nullptr || !InputAtLeast(stack, sizeof(SET_GSHAREDINFO_INPUT))) {
@@ -205,6 +375,10 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
 
 static void AffCtlUnload(PDRIVER_OBJECT DriverObject) {
     UNREFERENCED_PARAMETER(DriverObject);
+    // Desregistra callback ANTES de deletar device — evita callback pending
+    // ficar apontando pra codigo que ja saiu (BSOD garantido).
+    affctl::ProcessNotifyCleanup();
+
     UNICODE_STRING symlink;
     RtlInitUnicodeString(&symlink, AFFCTL_SYMLINK_NAME);
     IoDeleteSymbolicLink(&symlink);
@@ -215,18 +389,25 @@ static void AffCtlUnload(PDRIVER_OBJECT DriverObject) {
 }
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) {
-    UNREFERENCED_PARAMETER(RegistryPath);
-
     UNICODE_STRING devName;
     RtlInitUnicodeString(&devName, AFFCTL_DEVICE_NAME);
 
-    NTSTATUS status = IoCreateDevice(
+    // SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_NONE:
+    //   SYSTEM = GENERIC_ALL, Administrators = GENERIC_READ|WRITE|EXECUTE,
+    //   todos os demais = negado. Bloqueia a superficie de abuso BYOVD:
+    //   usuarios comuns nao conseguem abrir handle pra enviar IOCTL_INJECT_DLL
+    //   ou ler memoria kernel.
+    UNICODE_STRING sddl;
+    RtlInitUnicodeString(&sddl, SDDL_DEVOBJ_SYS_ALL_ADM_RWX_WORLD_NONE);
+    NTSTATUS status = IoCreateDeviceSecure(
         DriverObject,
         0,
         &devName,
         FILE_DEVICE_UNKNOWN,
         FILE_DEVICE_SECURE_OPEN,
         FALSE,
+        &sddl,
+        (LPCGUID)&GUID_DEVCLASS_AFFCTL,
         &g_deviceObject);
     if (!NT_SUCCESS(status)) {
         return status;
@@ -246,8 +427,22 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath) 
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = AffCtlDeviceControl;
     DriverObject->DriverUnload                         = AffCtlUnload;
 
+    // Registra callback de criacao/finalizacao de processos. Popula a tabela
+    // consultada por IOCTL_RESOLVE_PID_BY_NAME. Exige /INTEGRITYCHECK linkado.
+    NTSTATUS pnStatus = affctl::ProcessNotifyInit();
+    if (!NT_SUCCESS(pnStatus)) {
+        IoDeleteSymbolicLink(&symlink);
+        IoDeleteDevice(g_deviceObject);
+        g_deviceObject = nullptr;
+        return pnStatus;
+    }
+
     // gSharedInfo e configurada pelo app via IOCTL_SET_GSHAREDINFO_ADDR
     // (endereco resolvido no user-mode pelo PDB). Aqui apenas carregamos.
+
+    // Carrega offset/mask persistidos pelo affapp (Debug) na descoberta
+    // anterior. Silencioso se ausentes — o app pode chamar IOCTL_SET_OFFSET.
+    LoadPersistedOffset(RegistryPath);
 
     return STATUS_SUCCESS;
 }

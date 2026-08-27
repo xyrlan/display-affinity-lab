@@ -27,10 +27,6 @@ NTSTATUS InitSharedInfo();
 // for invalido, nao for janela, ou gSharedInfo nao tiver sido localizado.
 PVOID ResolveTagWnd(ULONG_PTR hwnd);
 
-// Le 'count' bytes a partir do inicio da tagWND para 'out'. Guardado por SEH.
-// count deve ser <= AFFCTL_MAX_RANGE (validado pelo chamador no dispatch).
-NTSTATUS ReadTagWndRange(ULONG_PTR hwnd, PVOID out, ULONG count);
-
 // Le 1 byte no 'offset' da tagWND para *value. Guardado por SEH.
 NTSTATUS ReadFlag(ULONG_PTR hwnd, ULONG offset, unsigned char* value);
 
@@ -38,8 +34,20 @@ NTSTATUS ReadFlag(ULONG_PTR hwnd, ULONG offset, unsigned char* value);
 // mask=0xFF equivale a zerar o byte todo (comportamento antigo). Guardado por SEH.
 NTSTATUS ClearFlag(ULONG_PTR hwnd, ULONG offset, unsigned char mask);
 
+// --- Rotinas DIAG (Debug-only) ---
+// Compiladas apenas quando AFFCTL_DIAG_IOCTLS esta definido (vcxproj Debug|x64).
+// Em Release nao existem no binario — o dispatch em driver.cpp tampouco expoe
+// os IOCTLs correspondentes. Isso remove info-leak primitives do driver assinado.
+#ifdef AFFCTL_DIAG_IOCTLS
+
+// Le 'count' bytes a partir do inicio da tagWND para 'out'. Guardado por SEH.
+// count deve ser <= AFFCTL_MAX_RANGE (validado pelo chamador no dispatch).
+NTSTATUS ReadTagWndRange(ULONG_PTR hwnd, PVOID out, ULONG count);
+
 // Diagnostico: preenche AFF_DIAG_OUTPUT (passado como void*) com despejo cru de
 // gSharedInfo e da entrada de handle calculada. Layout-agnostico, guardado por SEH.
 NTSTATUS Diag(ULONG_PTR hwnd, void* out);
+
+#endif // AFFCTL_DIAG_IOCTLS
 
 } // namespace affctl

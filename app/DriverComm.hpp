@@ -43,6 +43,20 @@ public:
     // Envia IOCTL_INJECT_DLL. A struct de input ja vem pronta do Injector.
     void injectDll(const INJECT_DLL_INPUT& in);
 
+    // Consulta a tabela populada pelo callback do driver e devolve o PID mais
+    // recente do processo com esse basename. Retorna 0 se nao houver.
+    uint32_t resolvePidByName(const wchar_t* imageName);
+
+    // Registra watch — driver auto-injeta em processos futuros com esse
+    // basename (e nos filhos deles, tree injection). Injecao ocorre no
+    // callback de thread create -> APC antes do EntryPoint rodar.
+    void watchName(const wchar_t* imageName,
+                   const wchar_t* dllPath,
+                   uint64_t       loadLibraryAddr);
+
+    // Remove watch por nome.
+    void unwatchName(const wchar_t* imageName);
+
 private:
     HANDLE m_handle;
 

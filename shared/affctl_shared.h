@@ -18,6 +18,10 @@
 #define AFFCTL_USER_PATH     L"\\\\.\\AffCtl"       // caminho do app (CreateFileW)
 
 // -------- IOCTLs (METHOD_BUFFERED, FILE_ANY_ACCESS) --------
+// DIAG (Debug-only): despeja bytes crus da tagWND. Usado UMA VEZ na descoberta
+// heuristica do offset da flag DisplayAffinity. Em Release o driver e compilado
+// sem esse case — retorna STATUS_INVALID_DEVICE_REQUEST — pra nao servir como
+// primitiva de info-leak de memoria kernel adjacente.
 #define IOCTL_READ_RANGE \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_SET_OFFSET \
@@ -28,7 +32,9 @@
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_SET_GSHAREDINFO_ADDR \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x804, METHOD_BUFFERED, FILE_ANY_ACCESS)
-// Diagnostico: despeja bytes crus de gSharedInfo e da entrada de handle calculada.
+// DIAG (Debug-only): despeja bytes crus de gSharedInfo, HANDLEENTRY e sondagens
+// de phead. Mesma politica: gate em Release para nao vazar layouts internos do
+// win32k.
 #define IOCTL_AFF_DIAG \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x805, METHOD_BUFFERED, FILE_ANY_ACCESS)
 // Endereco absoluto de win32kbase!ValidateHwnd (resolvido no app via PDB).
@@ -39,9 +45,24 @@
 // ZwAllocateVirtualMemory + KeInsertQueueApc). O app resolve PID/TID/LoadLibraryW.
 #define IOCTL_INJECT_DLL \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x807, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Resolve PID mais recente por nome de executavel. Popula-se via callback
+// PsSetCreateProcessNotifyRoutineEx (so ve processos criados APOS o driver).
+#define IOCTL_RESOLVE_PID_BY_NAME \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x808, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Registra "watch": todo processo futuro com esse basename (ou filho de um ja
+// marcado) recebe injecao automatica no NASCIMENTO (via callback de thread).
+#define IOCTL_WATCH_NAME \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x809, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Remove um watch previamente registrado (matching por nome exato).
+#define IOCTL_UNWATCH_NAME \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Limite defensivo de bytes lidos da tagWND numa unica chamada de READ_RANGE.
-#define AFFCTL_MAX_RANGE 8192u
+// tagWND real ocupa ~0x300..0x400 bytes em Win10/11; 1024 e um teto generoso
+// que ainda cabe dentro do objeto e nao extrapola pra estruturas adjacentes na
+// session pool (evita info-leak). Historicamente era 8192 — reduzido no
+// hardening pre-assinatura.
+#define AFFCTL_MAX_RANGE 1024u
 
 // -------- Structs de I/O --------
 // HWND viaja como inteiro de 64 bits para ter layout identico em kernel e user.
@@ -87,6 +108,41 @@ typedef struct _SET_GSHAREDINFO_INPUT {
 typedef struct _SET_VALIDATE_HWND_INPUT {
     unsigned long long Address; // base(win32kbase.sys) + RVA(ValidateHwnd)
 } SET_VALIDATE_HWND_INPUT, *PSET_VALIDATE_HWND_INPUT;
+
+// Buffer estatico do nome do executavel usado no IOCTL_RESOLVE_PID_BY_NAME.
+#define AFFCTL_MAX_IMAGE_NAME 128
+
+// IOCTL_RESOLVE_PID_BY_NAME - input
+typedef struct _RESOLVE_PID_INPUT {
+    wchar_t       ImageName[AFFCTL_MAX_IMAGE_NAME]; // basename (ex: "afftarget.exe")
+    unsigned long ImageNameLen;                     // bytes (sem NUL)
+    unsigned long _pad;
+} RESOLVE_PID_INPUT, *PRESOLVE_PID_INPUT;
+
+// IOCTL_RESOLVE_PID_BY_NAME - output
+typedef struct _RESOLVE_PID_OUTPUT {
+    unsigned long long Pid; // 0 = nao encontrado
+} RESOLVE_PID_OUTPUT, *PRESOLVE_PID_OUTPUT;
+
+// IOCTL_WATCH_NAME - input
+// Watch: driver auto-injeta a DLL em qualquer processo futuro que caia num destes:
+//   a) basename == ImageName
+//   b) ParentProcessId aponta pra um processo ja marcado (tree injection)
+// Injecao acontece no callback de thread create -> APC antes do EntryPoint rodar.
+typedef struct _WATCH_NAME_INPUT {
+    wchar_t            ImageName[AFFCTL_MAX_IMAGE_NAME]; // basename do EXE alvo
+    unsigned long      ImageNameLen;                     // bytes (sem NUL)
+    unsigned long      DllPathLen;                       // bytes (sem NUL)
+    unsigned long long LoadLibraryAddr;                  // kernel32!LoadLibraryW
+    wchar_t            DllPath[520];                     // path absoluto da DLL
+} WATCH_NAME_INPUT, *PWATCH_NAME_INPUT;
+
+// IOCTL_UNWATCH_NAME - input
+typedef struct _UNWATCH_NAME_INPUT {
+    wchar_t       ImageName[AFFCTL_MAX_IMAGE_NAME];
+    unsigned long ImageNameLen;
+    unsigned long _pad;
+} UNWATCH_NAME_INPUT, *PUNWATCH_NAME_INPUT;
 
 // IOCTL_INJECT_DLL - input
 // LoadLibraryW e resolvido no lado user (mesmo VA em todos processos da sessao,
