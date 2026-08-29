@@ -21,6 +21,8 @@
 #include <cstring>
 #include <exception>
 #include <string>
+#include <io.h>       // _setmode, _fileno (pra --rpm --raw)
+#include <fcntl.h>    // _O_BINARY
 
 #ifndef WDA_NONE
 #define WDA_NONE               0x00
@@ -296,6 +298,9 @@ static void printHelp() {
         "  --watch <exe> [dll]            Registra watch — driver injeta em qualquer\n"
         "                                 processo futuro com esse basename e filhos\n"
         "  --unwatch <exe>                Remove watch previamente registrado\n"
+        "  --global-hook <exe> [dll]      Ring-3 fallback: SetWindowsHookEx global. Use\n"
+        "                                 pra alvos com anti-tamper que rejeitam a\n"
+        "                                 injecao kernel (ex: MMO clients). Roda ate Ctrl+C.\n"
         "\n"
         "COMANDOS DE ESTADO\n"
         "  --reset-cache                  Apaga offset persistido no Registry\n"
@@ -318,6 +323,7 @@ static void printHelp() {
         "  affapp.exe --watch cmd.exe --dll C:\\payloads\\meu.dll\n"
         "  affapp.exe --inject 4820\n"
         "  affapp.exe --inject-by-name notepad.exe\n"
+        "  affapp.exe --global-hook rubinot_dx.exe\n"
         "  affapp.exe --demo --guard\n"
         "\n"
         "CODIGOS DE RETORNO\n"
@@ -435,6 +441,158 @@ static int runUnwatch(int argc, char** argv, int startIdx) {
         fprintf(stderr, "[unwatch] erro: %s\n", e.what());
         return 1;
     }
+}
+
+// TID da thread que roda o message loop do --global-hook. O handler de Ctrl+C
+// (que roda em thread SEPARADA criada pelo Windows) usa isso pra postar WM_QUIT
+// pra thread certa — PostQuitMessage() posta pra thread que chamou, e o handler
+// nao esta na main.
+static DWORD g_globalHookThreadTid = 0;
+static BOOL WINAPI GlobalHookCtrlHandler(DWORD ctrl) {
+    if ((ctrl == CTRL_C_EVENT || ctrl == CTRL_BREAK_EVENT ||
+         ctrl == CTRL_CLOSE_EVENT) && g_globalHookThreadTid) {
+        PostThreadMessageW(g_globalHookThreadTid, WM_QUIT, 0, 0);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// --global-hook <exe> [dll] — Ring-3 fallback pra alvos com anti-tamper que
+// rejeitam a injecao kernel (Rubinot, MMO clients com hooks internos em
+// LdrLoadDll). Usa SetWindowsHookEx global (WH_GETMESSAGE, dwThreadId=0), que
+// forca o win32k a carregar a DLL em CADA processo que dispatcha mensagens.
+//
+// Como o load acontece via user32!__ClientLoadLibrary (modulo signed pela MS),
+// hooks internos em LdrLoadDll que validam caller aceitam — a rota e "blessed"
+// pelo Windows. A DLL usa filter file em %TEMP%\affbypass_target.txt pra so
+// ATIVAR nos processos com o nome alvo (senao ela carrega em tudo).
+static int runGlobalHook(int argc, char** argv, int startIdx) {
+    if (startIdx + 1 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --global-hook <nome-exe> [caminho-dll]\n");
+        fprintf(stderr, "     ex: affapp.exe --global-hook rubinot_dx.exe\n");
+        fprintf(stderr, "         affapp.exe --global-hook cmd.exe --dll C:\\payload.dll\n");
+        return 2;
+    }
+    const char* exeNameA = argv[startIdx + 1];
+
+    std::wstring dllPath;
+    try {
+        dllPath = resolveDllPath(argc, argv, startIdx + 2);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[global-hook] %s\n", e.what());
+        return 2;
+    }
+
+    // 1) Escreve o filter file — affbypass!DllMain le e SO ativa em processos
+    //    cujo basename bate. Sem esse filtro a DLL carregaria em dezenas de
+    //    processos (todo GUI process no desktop).
+    char tmpDir[MAX_PATH] = {0};
+    if (GetTempPathA(MAX_PATH, tmpDir) == 0) {
+        fprintf(stderr, "[global-hook] GetTempPath falhou (GLE=%lu)\n", GetLastError());
+        return 1;
+    }
+    std::string filterPath = std::string(tmpDir) + "affbypass_target.txt";
+    {
+        HANDLE h = CreateFileA(filterPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) {
+            fprintf(stderr, "[global-hook] nao consegui criar filter file: %s (GLE=%lu)\n",
+                    filterPath.c_str(), GetLastError());
+            return 1;
+        }
+        DWORD w = 0;
+        WriteFile(h, exeNameA, (DWORD)strlen(exeNameA), &w, nullptr);
+        CloseHandle(h);
+    }
+
+    // 2) Carrega affbypass.dll no PROPRIO processo host (nos mesmos), mas SEM
+    //    executar DllMain — DONT_RESOLVE_DLL_REFERENCES mapea a imagem e popula
+    //    o export table (permite GetProcAddress) mas nao chama DllMain nem
+    //    resolve imports. Isso evita o affapp ficar com o hook do MinHook em
+    //    user32!SetWindowDisplayAffinity — side effect inutil e sujo.
+    //
+    //    O SetWindowsHookEx so precisa do HMODULE pra fazer GetModuleFileName
+    //    e descobrir o path da DLL (pra passar aos outros processos, que aí
+    //    fazem load NORMAL com DllMain rodando).
+    HMODULE hDll = LoadLibraryExW(dllPath.c_str(), nullptr,
+                                  DONT_RESOLVE_DLL_REFERENCES |
+                                  LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!hDll) {
+        fprintf(stderr, "[global-hook] LoadLibraryExW falhou (GLE=%lu). DLL: %ls\n",
+                GetLastError(), dllPath.c_str());
+        DeleteFileA(filterPath.c_str());
+        return 1;
+    }
+
+    HOOKPROC pfn = (HOOKPROC)GetProcAddress(hDll, "GlobalHookProc");
+    if (!pfn) {
+        fprintf(stderr, "[global-hook] GlobalHookProc nao exportado em %ls\n",
+                dllPath.c_str());
+        fprintf(stderr, "              (recompila affbypass — precisa da Fase C).\n");
+        DeleteFileA(filterPath.c_str());
+        return 1;
+    }
+
+    // 3) Instala hooks GLOBAIS em multiplos tipos — cada um dispara em situacoes
+    //    diferentes, e o objetivo e maximizar chance de ativar em qualquer processo
+    //    GUI, incluindo jogos que fazem message pump nao-standard:
+    //      WH_GETMESSAGE  — GetMessage/PeekMessage retornando (message pump classico)
+    //      WH_CBT         — criacao/destruicao/foco/ativacao de janela (universal)
+    //      WH_CALLWNDPROC — antes de SendMessage entregar (usado por praticamente
+    //                       qualquer inter-window communication)
+    //
+    //    Basta UM dos 3 disparar em qualquer thread do alvo pro Windows carregar
+    //    a DLL. Jogos que evitam WH_GETMESSAGE geralmente ainda passam por WH_CBT
+    //    ao criar janelas iniciais.
+    struct HookInstall { int id; const char* name; HHOOK handle; };
+    HookInstall hooks[] = {
+        { WH_GETMESSAGE,  "WH_GETMESSAGE",  nullptr },
+        { WH_CBT,         "WH_CBT",         nullptr },
+        { WH_CALLWNDPROC, "WH_CALLWNDPROC", nullptr },
+    };
+    int installed = 0;
+    for (auto& hk : hooks) {
+        hk.handle = SetWindowsHookExW(hk.id, pfn, hDll, 0);
+        if (hk.handle) ++installed;
+    }
+    if (installed == 0) {
+        fprintf(stderr, "[global-hook] SetWindowsHookExW falhou em TODOS os tipos (GLE=%lu)\n",
+                GetLastError());
+        DeleteFileA(filterPath.c_str());
+        return 1;
+    }
+
+    printf("[global-hook] instalado (%d/%zu hooks ativos).\n", installed,
+           sizeof(hooks)/sizeof(hooks[0]));
+    for (auto& hk : hooks) {
+        printf("              %-16s %s\n", hk.name, hk.handle ? "OK" : "FALHOU");
+    }
+    printf("              DLL:        %ls\n", dllPath.c_str());
+    printf("              Alvo:       %s\n", exeNameA);
+    printf("              Filter:     %s\n", filterPath.c_str());
+    printf("              Windows carrega a DLL em cada processo que dispara qualquer\n");
+    printf("              um dos hooks; a DLL AUTO-DESCARTA em quem nao bate com o filtro.\n");
+    printf("              Ctrl+C pra desinstalar.\n");
+
+    // 4) Ctrl+C handler + message loop. GetMessage bloqueia; sem message loop,
+    //    hooks globais nao propagam pra outros processos (Windows precisa que
+    //    o processo host esteja "vivo" na pipeline de mensagens do desktop).
+    g_globalHookThreadTid = GetCurrentThreadId();
+    SetConsoleCtrlHandler(GlobalHookCtrlHandler, TRUE);
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+
+    SetConsoleCtrlHandler(GlobalHookCtrlHandler, FALSE);
+    for (auto& hk : hooks) {
+        if (hk.handle) UnhookWindowsHookEx(hk.handle);
+    }
+    DeleteFileA(filterPath.c_str());
+    printf("[global-hook] desinstalado.\n");
+    return 0;
 }
 
 // --inject-by-name <exe> [dll] — resolve PID pelo nome do executavel via
@@ -656,6 +814,493 @@ static int runDemo(int argc, char** argv, int /*startIdx*/) {
     }
 }
 
+// ============================================================================
+// Scan de memoria: --scan-int32, --scan-refine, --scan-show, --scan-clear
+// State em %TEMP%\affapp_scan_state.bin — layout:
+//   [pid u32][hitCount u32][hits u64 * hitCount]
+// Fluxo tipico pra achar HP em rubinot:
+//   1. affapp --scan-int32 <pid> 100    (HP atual, escreve state)
+//   2. (tomar hit no jogo, HP -> 95)
+//   3. affapp --scan-refine <pid> 95    (filtra candidates que agora = 95)
+//   4. repetir 2-3 ate ~5-10 candidates
+//   5. affapp --scan-show               (mostra VAs sobreviventes)
+// ============================================================================
+
+// Nome do slot de state (permite paralelizar multiplos scans em curso:
+// --state hp / --state mp / --state stat3 ...). Default = "default".
+static std::wstring g_stateSlot = L"default";
+
+static std::wstring scanStatePath() {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring p(tmp);
+    if (!p.empty() && p.back() != L'\\' && p.back() != L'/') p += L'\\';
+    p += L"affapp_scan_";
+    p += g_stateSlot;
+    p += L".bin";
+    return p;
+}
+
+// Extrai --state <name> de argv. Modifica g_stateSlot. Nao remove os args
+// (os handlers ja ignoram flags desconhecidas).
+static void parseStateSlot(int argc, char** argv, int startIdx) {
+    for (int i = startIdx; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--state") == 0) {
+            const char* s = argv[i + 1];
+            std::wstring w;
+            while (*s) w.push_back(static_cast<wchar_t>(*s++));
+            if (!w.empty()) g_stateSlot = w;
+            return;
+        }
+    }
+}
+
+struct ScanState {
+    uint32_t pid;
+    std::vector<uint64_t> hits;
+};
+
+static bool loadScanState(ScanState& out) {
+    std::wstring path = scanStatePath();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint32_t pid = 0, hitCount = 0;
+    DWORD r = 0;
+    if (!ReadFile(h, &pid, sizeof(pid), &r, nullptr) || r != sizeof(pid)) {
+        CloseHandle(h); return false;
+    }
+    if (!ReadFile(h, &hitCount, sizeof(hitCount), &r, nullptr) || r != sizeof(hitCount)) {
+        CloseHandle(h); return false;
+    }
+    if (hitCount > 10'000'000u) { CloseHandle(h); return false; } // sanity
+    out.pid = pid;
+    out.hits.assign(hitCount, 0);
+    if (hitCount > 0) {
+        DWORD need = static_cast<DWORD>(hitCount * sizeof(uint64_t));
+        if (!ReadFile(h, out.hits.data(), need, &r, nullptr) || r != need) {
+            CloseHandle(h); return false;
+        }
+    }
+    CloseHandle(h);
+    return true;
+}
+
+static bool saveScanState(const ScanState& s) {
+    std::wstring path = scanStatePath();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint32_t hitCount = static_cast<uint32_t>(s.hits.size());
+    DWORD w = 0;
+    WriteFile(h, &s.pid, sizeof(s.pid), &w, nullptr);
+    WriteFile(h, &hitCount, sizeof(hitCount), &w, nullptr);
+    if (hitCount > 0) {
+        WriteFile(h, s.hits.data(),
+            static_cast<DWORD>(hitCount * sizeof(uint64_t)), &w, nullptr);
+    }
+    CloseHandle(h);
+    return true;
+}
+
+// Constroi (pattern, mask) pra scan de int32 exato.
+static void int32Pattern(uint32_t value, uint8_t (&pat)[4], uint8_t (&mask)[4]) {
+    memcpy(pat, &value, 4);
+    memset(mask, 0xFF, 4);
+}
+
+// --scan-int32 <pid> <value> [--start HEX] [--end HEX]
+// Full scan. Default range: 0x10000 .. 0x7FFF'FFFF'FFFF (user space).
+// Escreve state (pid + hits) em %TEMP%\affapp_scan_state.bin.
+static int runScanInt32(int argc, char** argv, int startIdx) {
+    if (startIdx + 2 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --scan-int32 <pid> <value> [--start HEX] [--end HEX] [--state NAME]\n");
+        fprintf(stderr, "  default range: 0x10000 .. 0x7FFFFFFF0000\n");
+        fprintf(stderr, "  --state NAME  slot de persistencia (default 'default'). Paraleliza scans.\n");
+        return 2;
+    }
+    parseStateSlot(argc, argv, startIdx);
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    uint32_t value = static_cast<uint32_t>(std::strtoul(argv[startIdx + 2], nullptr, 0));
+    // Default range: user space completo. VAD skip no kernel torna varredura de
+    // 128TB viavel em ~1min mesmo com heap valida grande. User pode restringir
+    // com --start/--end se souber onde alvo aloca (ex: 0x100000000..0x200000000
+    // pra heap tipica de app medio, sub-segundo scan).
+    uint64_t start = 0x10000ULL;
+    uint64_t end   = 0x7FFFFFFF0000ULL;
+    for (int i = startIdx + 3; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--start") == 0) start = std::strtoull(argv[++i], nullptr, 0);
+        else if (std::strcmp(argv[i], "--end")   == 0) end   = std::strtoull(argv[++i], nullptr, 0);
+    }
+    if (pid == 0 || end <= start) { fprintf(stderr, "params invalidos\n"); return 2; }
+
+    uint8_t pat[4], mask[4];
+    int32Pattern(value, pat, mask);
+
+    try {
+        DriverComm comm;
+        printf("[scan] PID=%u int32=%u (0x%X) range=[0x%llX..0x%llX]\n",
+            pid, value, value, (unsigned long long)start, (unsigned long long)end);
+
+        ScanState state{ pid, {} };
+        uint64_t cursor = start;
+        uint64_t chunkSize = AFFCTL_SCAN_MAX_CHUNK;
+        auto t0 = GetTickCount64();
+        uint64_t chunks = 0;
+        uint64_t totalHits = 0;
+        while (cursor < end) {
+            uint64_t size = (end - cursor < chunkSize) ? (end - cursor) : chunkSize;
+            auto out = comm.scanMemory(pid, cursor, size,
+                                       pat, mask, 4, AFFCTL_SCAN_MAX_HITS);
+            for (uint32_t i = 0; i < out.HitCount; ++i) {
+                state.hits.push_back(out.Hits[i]);
+            }
+            totalHits += out.HitCount;
+            ++chunks;
+            if (out.Truncated) {
+                // Chunk truncou por MaxHits — continua deste ponto pra proximo scanMemory
+                cursor = out.NextVa;
+                if (cursor == 0) cursor += size; // fallback
+            } else {
+                cursor += size;
+            }
+            // Progress a cada 100 chunks (~ 25GB)
+            if (chunks % 100 == 0) {
+                printf("  progress: cursor=0x%llX hits=%llu chunks=%llu elapsed=%llums\n",
+                    (unsigned long long)cursor, (unsigned long long)totalHits,
+                    (unsigned long long)chunks, GetTickCount64() - t0);
+                fflush(stdout);
+            }
+            // Sanity cutoff: rejeitar scans com hits absurdos (padrao muito comum)
+            if (state.hits.size() > 1'000'000ULL) {
+                printf("[scan!] > 1M hits, abortando (padrao muito comum? use --start pra restringir).\n");
+                break;
+            }
+        }
+        auto elapsed = GetTickCount64() - t0;
+        printf("[scan] DONE: %zu hits em %llu chunks, %llums\n",
+            state.hits.size(), (unsigned long long)chunks, elapsed);
+
+        if (!saveScanState(state)) {
+            fprintf(stderr, "[scan!] falha ao salvar state\n"); return 1;
+        }
+        printf("[scan] state salvo em: %ls\n", scanStatePath().c_str());
+        printf("[scan] proximo passo: mude o valor no jogo, rode 'affapp --scan-refine %u <novo_valor>'\n", pid);
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[scan!] %s\n", e.what()); return 1;
+    }
+}
+
+// --scan-refine <pid> <novo_value>
+// Filtra candidates carregados do state por igualdade com novo_value.
+// Faz RPM de 4 bytes pra cada VA (batch); mantem apenas os que casam.
+static int runScanRefine(int argc, char** argv, int startIdx) {
+    if (startIdx + 2 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --scan-refine <pid> <novo_value> [--state NAME]\n");
+        return 2;
+    }
+    parseStateSlot(argc, argv, startIdx);
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    uint32_t newVal = static_cast<uint32_t>(std::strtoul(argv[startIdx + 2], nullptr, 0));
+
+    ScanState state;
+    if (!loadScanState(state)) {
+        fprintf(stderr, "[refine!] sem state — rode --scan-int32 antes\n"); return 1;
+    }
+    if (state.pid != pid) {
+        fprintf(stderr, "[refine!] state e do PID %u, pediu %u\n", state.pid, pid); return 1;
+    }
+    printf("[refine] carregou %zu candidates do PID %u\n", state.hits.size(), pid);
+    if (state.hits.empty()) { fprintf(stderr, "[refine!] sem candidates\n"); return 1; }
+
+    try {
+        DriverComm comm;
+        std::vector<uint64_t> survivors;
+        survivors.reserve(state.hits.size());
+        auto t0 = GetTickCount64();
+        for (size_t i = 0; i < state.hits.size(); ++i) {
+            try {
+                auto buf = comm.readProcessMemory(pid, state.hits[i], 4);
+                if (buf.size() == 4) {
+                    uint32_t v = 0;
+                    memcpy(&v, buf.data(), 4);
+                    if (v == newVal) survivors.push_back(state.hits[i]);
+                }
+            } catch (...) {
+                // VA nao mais acessivel (paginas remapeadas etc) — ignora
+            }
+        }
+        auto elapsed = GetTickCount64() - t0;
+        printf("[refine] %zu -> %zu candidates em %llums\n",
+            state.hits.size(), survivors.size(), elapsed);
+        state.hits = std::move(survivors);
+        if (!saveScanState(state)) { fprintf(stderr, "[refine!] save falhou\n"); return 1; }
+        if (state.hits.size() <= 20) {
+            printf("[refine] survivors:\n");
+            for (uint64_t va : state.hits) printf("  0x%llX\n", (unsigned long long)va);
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[refine!] %s\n", e.what()); return 1;
+    }
+}
+
+// --scan-show [--state NAME] — mostra state atual (pid + N primeiros hits).
+static int runScanShow(int argc, char** argv, int startIdx) {
+    parseStateSlot(argc, argv, startIdx);
+    ScanState state;
+    if (!loadScanState(state)) { fprintf(stderr, "[show!] sem state\n"); return 1; }
+    printf("[state] PID=%u candidates=%zu\n", state.pid, state.hits.size());
+    size_t max = state.hits.size() < 50 ? state.hits.size() : 50;
+    for (size_t i = 0; i < max; ++i) {
+        printf("  [%zu] 0x%llX\n", i, (unsigned long long)state.hits[i]);
+    }
+    if (state.hits.size() > max) {
+        printf("  ... (+%zu ocultos)\n", state.hits.size() - max);
+    }
+    return 0;
+}
+
+// --scan-clear [--state NAME] — apaga state.
+static int runScanClear(int argc, char** argv, int startIdx) {
+    parseStateSlot(argc, argv, startIdx);
+    std::wstring p = scanStatePath();
+    if (DeleteFileW(p.c_str())) {
+        printf("[clear] state removido\n"); return 0;
+    }
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+        printf("[clear] ja estava vazio\n"); return 0;
+    }
+    fprintf(stderr, "[clear!] DeleteFile err=%lu\n", GetLastError()); return 1;
+}
+
+// --peb <pid> — retorna VA do PEB via PsGetProcessPeb (sem HANDLE).
+static int runPebCmd(int argc, char** argv, int startIdx) {
+    if (startIdx + 1 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --peb <pid>\n"); return 2;
+    }
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    if (pid == 0) return 2;
+    try {
+        DriverComm comm;
+        uint64_t peb = comm.getProcessPeb(pid);
+        printf("[peb] PID=%u PEB=0x%llX\n", pid, (unsigned long long)peb);
+        return peb ? 0 : 1;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[peb!] %s\n", e.what()); return 1;
+    }
+}
+
+// --modules <pid>
+// Walk PEB->Ldr->InLoadOrderModuleList via RPM. Lista todo modulo carregado
+// (nome, DllBase, SizeOfImage). Layout PEB/LDR_DATA_TABLE_ENTRY x64 estavel
+// desde Win10 (nao muda entre 22H2/24H2). Limite defensivo: 512 iteracoes.
+static int runModulesCmd(int argc, char** argv, int startIdx) {
+    if (startIdx + 1 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --modules <pid>\n"); return 2;
+    }
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    if (pid == 0) return 2;
+
+    auto readU64 = [](DriverComm& c, uint32_t p, uint64_t va) -> uint64_t {
+        auto b = c.readProcessMemory(p, va, 8);
+        if (b.size() != 8) throw std::runtime_error("read u64 falhou");
+        uint64_t v = 0; memcpy(&v, b.data(), 8); return v;
+    };
+    auto readU32 = [](DriverComm& c, uint32_t p, uint64_t va) -> uint32_t {
+        auto b = c.readProcessMemory(p, va, 4);
+        if (b.size() != 4) throw std::runtime_error("read u32 falhou");
+        uint32_t v = 0; memcpy(&v, b.data(), 4); return v;
+    };
+    auto readU16 = [](DriverComm& c, uint32_t p, uint64_t va) -> uint16_t {
+        auto b = c.readProcessMemory(p, va, 2);
+        if (b.size() != 2) throw std::runtime_error("read u16 falhou");
+        uint16_t v = 0; memcpy(&v, b.data(), 2); return v;
+    };
+
+    try {
+        DriverComm comm;
+        uint64_t peb = comm.getProcessPeb(pid);
+        if (!peb) { fprintf(stderr, "[modules!] PEB=0\n"); return 1; }
+        printf("[modules] PID=%u PEB=0x%llX\n", pid, (unsigned long long)peb);
+
+        // PEB->Ldr @ +0x18
+        uint64_t ldr = readU64(comm, pid, peb + 0x18);
+        if (!ldr) { fprintf(stderr, "[modules!] Ldr=0\n"); return 1; }
+
+        // InLoadOrderModuleList.Flink @ Ldr+0x10 (LIST_ENTRY first field)
+        uint64_t headVa = ldr + 0x10;
+        uint64_t current = readU64(comm, pid, headVa);
+        if (!current) { fprintf(stderr, "[modules!] first Flink=0\n"); return 1; }
+
+        printf("%-4s %-18s %-10s %s\n", "#", "DllBase", "Size", "Name");
+        int count = 0;
+        while (current != headVa && count < 512) {
+            // LDR_DATA_TABLE_ENTRY offsets (Win10/11 x64):
+            //   +0x30 = DllBase (PVOID)
+            //   +0x40 = SizeOfImage (ULONG)
+            //   +0x58 = BaseDllName.Length (u16), +0x58+8 = Buffer (PVOID)
+            uint64_t entry = current; // InLoadOrderLinks is first field, entry == current
+            uint64_t dllBase = 0;
+            uint32_t sizeOfImage = 0;
+            uint16_t nameLen = 0;
+            uint64_t nameBuf = 0;
+            try {
+                dllBase = readU64(comm, pid, entry + 0x30);
+                sizeOfImage = readU32(comm, pid, entry + 0x40);
+                nameLen = readU16(comm, pid, entry + 0x58);
+                nameBuf = readU64(comm, pid, entry + 0x58 + 8);
+            } catch (...) {
+                fprintf(stderr, "  [entry %d] read falhou @ 0x%llX\n", count, (unsigned long long)entry);
+                break;
+            }
+            std::string name = "(?)";
+            if (nameBuf && nameLen > 0 && nameLen < 512) {
+                try {
+                    auto nb = comm.readProcessMemory(pid, nameBuf, nameLen);
+                    // UTF-16 → ASCII simples (drop bytes altos)
+                    name.clear();
+                    for (size_t i = 0; i + 1 < nb.size(); i += 2) {
+                        uint16_t ch = nb[i] | (nb[i+1] << 8);
+                        name.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+                    }
+                } catch (...) { name = "(read fail)"; }
+            }
+            printf("[%3d] 0x%016llX %8u  %s\n",
+                count, (unsigned long long)dllBase, sizeOfImage, name.c_str());
+            ++count;
+            // Proximo Flink @ current+0x00
+            uint64_t next = readU64(comm, pid, current);
+            if (!next || next == current) break;
+            current = next;
+        }
+        printf("[modules] total: %d modulos\n", count);
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[modules!] %s\n", e.what()); return 1;
+    }
+}
+
+// --pib <pid> — Process Image Base. Retorna VA do PE image base via kernel
+// PsGetProcessSectionBaseAddress. Sem OpenProcess, sem HANDLE — bypassa
+// ObRegisterCallbacks. Util pra ancorar --rpm em processos que negam
+// GetProcAddress/QueryModuleInfo.
+static int runPib(int argc, char** argv, int startIdx) {
+    if (startIdx + 1 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --pib <pid>\n");
+        return 2;
+    }
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    if (pid == 0) { fprintf(stderr, "pid invalido\n"); return 2; }
+    try {
+        DriverComm comm;
+        uint64_t base = comm.getProcessImageBase(pid);
+        printf("[pib] PID=%u ImageBase=0x%llX\n", pid, (unsigned long long)base);
+        return base ? 0 : 1;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[pib!] %s\n", e.what()); return 1;
+    }
+}
+
+// --rpm <pid> <addr_hex|base|base+HEX> <bytes> [--raw]
+// Read Process Memory via kernel — usa affctl IOCTL_READ_PROCESS_MEMORY.
+// Bypassa ObRegisterCallbacks porque driver usa PsLookupProcessByProcessId
+// (sem HANDLE) + KeStackAttachProcess + RtlCopyMemory.
+// addr especial:
+//   base           = image base do proprio processo (via PsGetProcessSectionBaseAddress)
+//   base+0xNNN     = image base + offset hexadecimal
+// Default: hexdump. `--raw` escreve binario direto no stdout (redirecionar pra arquivo).
+static int runRpm(int argc, char** argv, int startIdx) {
+    if (startIdx + 3 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --rpm <pid> <addr_hex|base|base+0xNNN> <bytes> [--raw]\n");
+        fprintf(stderr, "  ex: affapp.exe --rpm 1234 0x7ff600000000 256\n");
+        fprintf(stderr, "  ex: affapp.exe --rpm 1234 base 64      # image base do exe\n");
+        fprintf(stderr, "  ex: affapp.exe --rpm 1234 base+0x1000 128\n");
+        return 2;
+    }
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    uint64_t addr = 0;
+    const char* addrArg = argv[startIdx + 2];
+    // Suporta "base" e "base+0xNNN" resolvendo via IOCTL_GET_PROCESS_BASE.
+    if (std::strncmp(addrArg, "base", 4) == 0) {
+        try {
+            DriverComm resolver;
+            uint64_t base = resolver.getProcessImageBase(pid);
+            if (base == 0) { fprintf(stderr, "[rpm] image base retornou 0 (proc morto?)\n"); return 1; }
+            uint64_t off = 0;
+            if (addrArg[4] == '+') off = std::strtoull(addrArg + 5, nullptr, 0);
+            addr = base + off;
+            printf("[rpm] base=0x%llX  off=0x%llX  addr=0x%llX\n",
+                (unsigned long long)base, (unsigned long long)off, (unsigned long long)addr);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[rpm] falha ao resolver base: %s\n", e.what()); return 1;
+        }
+    } else {
+        addr = std::strtoull(addrArg, nullptr, 0);
+    }
+    uint32_t bytes = static_cast<uint32_t>(std::strtoul(argv[startIdx + 3], nullptr, 0));
+    bool raw = false;
+    const char* outPath = nullptr;
+    for (int i = startIdx + 4; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--raw") == 0) raw = true;
+        else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
+    }
+
+    if (pid == 0 || bytes == 0 || bytes > AFFCTL_RPM_MAX) {
+        fprintf(stderr, "[rpm] parametros invalidos (pid=%u bytes=%u max=%u)\n",
+                pid, bytes, AFFCTL_RPM_MAX);
+        return 2;
+    }
+
+    try {
+        DriverComm comm;
+        // Em --raw stdout eh binario puro; headers vao pra stderr pra nao corromper.
+        FILE* logFp = raw ? stderr : stdout;
+        fprintf(logFp, "[rpm] PID=%u addr=0x%llX size=%u\n",
+               pid, (unsigned long long)addr, bytes);
+        auto buf = comm.readProcessMemory(pid, addr, bytes);
+        fprintf(logFp, "[rpm] OK - %zu bytes lidos\n", buf.size());
+
+        if (outPath) {
+            FILE* fout = nullptr;
+            if (fopen_s(&fout, outPath, "wb") != 0 || !fout) {
+                fprintf(stderr, "[rpm!] fopen %s falhou\n", outPath); return 1;
+            }
+            fwrite(buf.data(), 1, buf.size(), fout);
+            fclose(fout);
+            fprintf(logFp, "[rpm] escrito em %s\n", outPath);
+            return 0;
+        }
+        if (raw) {
+            _setmode(_fileno(stdout), _O_BINARY);
+            fwrite(buf.data(), 1, buf.size(), stdout);
+            fflush(stdout);
+            return 0;
+        }
+
+        // Hexdump padrao 16 bytes/linha.
+        for (size_t off = 0; off < buf.size(); off += 16) {
+            printf("  %012llX  ", (unsigned long long)(addr + off));
+            size_t line = std::min<size_t>(16, buf.size() - off);
+            for (size_t i = 0; i < 16; ++i) {
+                if (i < line) printf("%02X ", buf[off + i]); else printf("   ");
+                if (i == 7) printf(" ");
+            }
+            printf(" |");
+            for (size_t i = 0; i < line; ++i) {
+                uint8_t c = buf[off + i];
+                putchar((c >= 0x20 && c < 0x7F) ? c : '.');
+            }
+            printf("|\n");
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[rpm!] %s\n", e.what());
+        return 1;
+    }
+}
+
 // --status — diagnostico leve. Nao carrega PDB, nao cria janelas, nao acessa
 // internet. Reporta:
 //   1. driver \\.\AffCtl abre? (CreateFileW succeeds)
@@ -736,7 +1381,16 @@ int main(int argc, char** argv) {
     if (std::strcmp(cmd, "--inject-by-name")  == 0) return runInjectByName(argc, argv, 1);
     if (std::strcmp(cmd, "--watch")           == 0) return runWatch(argc, argv, 1);
     if (std::strcmp(cmd, "--unwatch")         == 0) return runUnwatch(argc, argv, 1);
+    if (std::strcmp(cmd, "--global-hook")     == 0) return runGlobalHook(argc, argv, 1);
     if (std::strcmp(cmd, "--capture")         == 0) return runCapture(argc, argv, 1);
+    if (std::strcmp(cmd, "--rpm")             == 0) return runRpm(argc, argv, 1);
+    if (std::strcmp(cmd, "--pib")             == 0) return runPib(argc, argv, 1);
+    if (std::strcmp(cmd, "--peb")             == 0) return runPebCmd(argc, argv, 1);
+    if (std::strcmp(cmd, "--modules")         == 0) return runModulesCmd(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-int32")      == 0) return runScanInt32(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-refine")     == 0) return runScanRefine(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-show")       == 0) return runScanShow(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-clear")      == 0) return runScanClear(argc, argv, 1);
 
     // Comando desconhecido -> mensagem clara + help + exit code 2 (usage error).
     fprintf(stderr, "affapp: comando desconhecido: '%s'\n\n", cmd);

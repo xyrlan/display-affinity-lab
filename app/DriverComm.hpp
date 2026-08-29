@@ -57,6 +57,28 @@ public:
     // Remove watch por nome.
     void unwatchName(const wchar_t* imageName);
 
+    // Le `size` bytes do VA `address` no espaco do processo `pid` via
+    // KeStackAttachProcess+RtlCopyMemory (bypass de ObRegisterCallbacks).
+    // Tamanho limitado a AFFCTL_RPM_MAX (64KB) por chamada.
+    std::vector<uint8_t> readProcessMemory(uint32_t pid, uint64_t address, uint32_t size);
+
+    // Retorna PE image base do processo alvo (via PsGetProcessSectionBaseAddress).
+    // 0 se o processo nao tem section (raro) ou sumiu.
+    uint64_t getProcessImageBase(uint32_t pid);
+
+    // Retorna PPEB do processo alvo (VA no espaco dele). User faz RPM subsequente
+    // pra walk PEB->Ldr->InLoadOrderModuleList.
+    uint64_t getProcessPeb(uint32_t pid);
+
+    // Scan de memoria do processo alvo por padrao com wildcard mask (0xFF=match,
+    // 0x00=wildcard). Retorna hits (VAs absolutos) ate maxHits.
+    // Chunk maximo: AFFCTL_SCAN_MAX_CHUNK (256MB). User chunkifica ranges maiores.
+    // out.NextVa != 0 significa que caller precisa continuar dali (truncou por maxHits).
+    SCAN_MEMORY_OUTPUT scanMemory(
+        uint32_t pid, uint64_t startVa, uint64_t size,
+        const uint8_t* pattern, const uint8_t* mask, uint32_t patternLen,
+        uint32_t maxHits);
+
 private:
     HANDLE m_handle;
 

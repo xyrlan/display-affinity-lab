@@ -47,12 +47,16 @@
     <ClCompile Include="tagwnd.cpp" />
     <ClCompile Include="inject.cpp" />
     <ClCompile Include="process_notify.cpp" />
+    <ClCompile Include="rpm.cpp" />
+    <ClCompile Include="scan.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="tagwnd.h" />
     <ClInclude Include="win32k_structs.h" />
     <ClInclude Include="inject.h" />
     <ClInclude Include="process_notify.h" />
+    <ClInclude Include="rpm.h" />
+    <ClInclude Include="scan.h" />
     <ClInclude Include="..\shared\affctl_shared.h" />
   </ItemGroup>
   <ItemGroup>
