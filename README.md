@@ -74,6 +74,25 @@ dxshared_stream.exe pt out_dir --fps 30 --seconds 10 --save-every 30
 
 Flags: `--fps N`, `--seconds N`, `--save-every N`, `--stats-only` (sem salvar).
 
+### Memory read via kernel (bypassa ObCallbacks do EMAC)
+
+O driver `affctl` expõe `IOCTL_READ_PROCESS_MEMORY` e `IOCTL_GET_PROCESS_BASE` — leitura de VA de outro processo via `PsLookupProcessByProcessId` + `KeStackAttachProcess` + `RtlCopyMemory`, **sem abrir HANDLE**. Bypassa `ObRegisterCallbacks` do EMAC (que só intercepta abertura de HANDLE).
+
+```bat
+REM Image base do rubinot (sem OpenProcess — .NET Process.MainModule dá DENIED aqui)
+affapp --pib 8872
+REM [pib] PID=8872 ImageBase=0x140000000
+
+REM Le 128 bytes do image base -> retorna MZ header + DOS stub reais
+affapp --rpm 8872 base 128
+
+REM Le PE signature no e_lfanew
+affapp --rpm 8872 base+0x178 32
+REM 000140000178  50 45 00 00 64 86 0B 00 ...  |PE..d...|
+```
+
+Validado em rubinot in-game com EMAC ativo. Detalhes em [docs/POC_CLOSURE.md](docs/POC_CLOSURE.md#esforço-alto-múltiplas-sessões--implementado) (roadmap item 8).
+
 ### Pixel-read (ROI) para pixel-bot
 
 *Não incluído no PoC atual — está no [roadmap](docs/POC_CLOSURE.md#roadmap-futuro-opcional).* Arquitetura sugerida usa `ID3D11DeviceContext::CopySubresourceRegion` em vez de `CopyResource` inteira:

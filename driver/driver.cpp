@@ -19,6 +19,7 @@
 #include "tagwnd.h"
 #include "inject.h"
 #include "process_notify.h"
+#include "rpm.h"
 #include "../shared/affctl_shared.h"
 
 // GUID de classe do device (privado deste driver). Nao esta associado a nenhum
@@ -262,6 +263,57 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             (PVOID)(ULONG_PTR)in->LdrLoadDllAddr,
             in->DllPath,
             (SIZE_T)in->DllPathLen);
+        break;
+    }
+
+    case IOCTL_GET_PROCESS_BASE: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(GET_PROCESS_BASE_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (!OutputAtLeast(stack, sizeof(GET_PROCESS_BASE_OUTPUT))) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        GET_PROCESS_BASE_INPUT in = *reinterpret_cast<PGET_PROCESS_BASE_INPUT>(buffer);
+        if (in.Pid == 0) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        ULONG_PTR imageBase = 0;
+        status = affctl::GetProcessImageBase((HANDLE)(ULONG_PTR)in.Pid, &imageBase);
+        if (NT_SUCCESS(status)) {
+            auto out = reinterpret_cast<PGET_PROCESS_BASE_OUTPUT>(buffer);
+            out->ImageBase = (unsigned long long)imageBase;
+            info = sizeof(GET_PROCESS_BASE_OUTPUT);
+        }
+        break;
+    }
+
+    case IOCTL_READ_PROCESS_MEMORY: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(RPM_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        RPM_INPUT in = *reinterpret_cast<PRPM_INPUT>(buffer); // copia antes de sobrescrever
+        if (in.Pid == 0 || in.Size == 0 || in.Size > AFFCTL_RPM_MAX) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (!OutputAtLeast(stack, in.Size)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        // METHOD_BUFFERED: SystemBuffer serve tanto pra input quanto output.
+        // Copia local do input ja feita acima; podemos escrever direto no buffer.
+        status = affctl::ReadProcessMemoryKernel(
+            (HANDLE)(ULONG_PTR)in.Pid,
+            (ULONG_PTR)in.Address,
+            in.Size,
+            buffer);
+        if (NT_SUCCESS(status)) {
+            info = in.Size;
+        }
         break;
     }
 

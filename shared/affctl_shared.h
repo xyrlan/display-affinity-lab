@@ -56,6 +56,18 @@
 // Remove um watch previamente registrado (matching por nome exato).
 #define IOCTL_UNWATCH_NAME \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80A, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Le memoria de outro processo via KeStackAttachProcess+RtlCopyMemory.
+// Bypassa ObRegisterCallbacks (que so intercepta abertura de HANDLE)
+// porque nunca abrimos handle — PsLookupProcessByProcessId retorna PEPROCESS
+// direto. Util contra anti-cheats que negam OpenProcess mas nao podem hookar
+// leitura direta de VA no contexto do processo.
+#define IOCTL_READ_PROCESS_MEMORY \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80B, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Retorna PE image base do processo alvo via PsGetProcessSectionBaseAddress
+// (kernel export). Sem HANDLE, sem attach — bypassa ObRegisterCallbacks. Util
+// pra escanear estruturas relativas ao image base em alvos que negam OpenProcess.
+#define IOCTL_GET_PROCESS_BASE \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Limite defensivo de bytes lidos da tagWND numa unica chamada de READ_RANGE.
 // tagWND real ocupa ~0x300..0x400 bytes em Win10/11; 1024 e um teto generoso
@@ -159,6 +171,29 @@ typedef struct _INJECT_DLL_INPUT {
     unsigned long      _pad;
     wchar_t            DllPath[520];     // Path da DLL (max ~260 WCHARs = MAX_PATH)
 } INJECT_DLL_INPUT, *PINJECT_DLL_INPUT;
+
+// IOCTL_READ_PROCESS_MEMORY - input
+// Limite defensivo por chamada (nao IRP-level; user chunkifica pra ler mais).
+// 64KB e generoso pra pixel-bot / scanning de estruturas; buffer maior gera
+// pool pressure e latencia no CopyResource-analog.
+#define AFFCTL_RPM_MAX 65536u
+typedef struct _RPM_INPUT {
+    unsigned long long Pid;      // PID do processo alvo
+    unsigned long long Address;  // VA no espaco do alvo pra ler
+    unsigned long      Size;     // bytes a ler (<= AFFCTL_RPM_MAX)
+    unsigned long      _pad;
+} RPM_INPUT, *PRPM_INPUT;
+// IOCTL_READ_PROCESS_MEMORY - output: BYTE[Size]
+// Info do IRP = bytes efetivamente lidos (== Size em sucesso).
+
+// IOCTL_GET_PROCESS_BASE - input
+typedef struct _GET_PROCESS_BASE_INPUT {
+    unsigned long long Pid;
+} GET_PROCESS_BASE_INPUT, *PGET_PROCESS_BASE_INPUT;
+// IOCTL_GET_PROCESS_BASE - output
+typedef struct _GET_PROCESS_BASE_OUTPUT {
+    unsigned long long ImageBase; // 0 se falhou (proc morreu / sem section)
+} GET_PROCESS_BASE_OUTPUT, *PGET_PROCESS_BASE_OUTPUT;
 
 // IOCTL_AFF_DIAG - input: HWND_INPUT ; output: AFF_DIAG_OUTPUT
 // Despejo cru (layout-agnostico) para diagnosticar a resolucao HWND->tagWND.

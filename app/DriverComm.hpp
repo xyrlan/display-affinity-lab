@@ -57,6 +57,15 @@ public:
     // Remove watch por nome.
     void unwatchName(const wchar_t* imageName);
 
+    // Le `size` bytes do VA `address` no espaco do processo `pid` via
+    // KeStackAttachProcess+RtlCopyMemory (bypass de ObRegisterCallbacks).
+    // Tamanho limitado a AFFCTL_RPM_MAX (64KB) por chamada.
+    std::vector<uint8_t> readProcessMemory(uint32_t pid, uint64_t address, uint32_t size);
+
+    // Retorna PE image base do processo alvo (via PsGetProcessSectionBaseAddress).
+    // 0 se o processo nao tem section (raro) ou sumiu.
+    uint64_t getProcessImageBase(uint32_t pid);
+
 private:
     HANDLE m_handle;
 

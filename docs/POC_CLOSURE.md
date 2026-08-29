@@ -203,9 +203,9 @@ O PoC está **fechado**. Estes são possíveis próximos passos, em ordem cresce
 6. **Otimização de streaming pra 60 FPS** — skip `Map` em frames não-salvos, background thread pra `saveBmp`, double-buffered staging. Meta: 60 FPS estável em 2560x1440.
 7. **Bot config-driven** — `dxshared_bot --rules rules.json` com regras `{roi, expected_color, threshold, action}`. Loop 100 Hz, decisão em <10ms. Prova conceito de pixel-bot.
 
-### Esforço alto (múltiplas sessões)
+### Esforço alto (múltiplas sessões) — implementado
 
-8. **Memory reading** via `affctl.sys` kernel — leitura de RAM de rubinot bypassing o `ObRegisterCallbacks`. Complementa pixel-reading com valores exatos (HP, MP, coords). Requer estender `affctl` com `IOCTL_READ_PROCESS_MEMORY`.
+8. **Memory reading** via `affctl.sys` kernel — leitura de RAM de rubinot bypassing o `ObRegisterCallbacks`. **Implementado e validado** (2026-08-29).
 
    **Como bypassa ObCallbacks** (importante): o EMAC intercepta apenas o *path de abertura de HANDLE* (`NtOpenProcess` → `ObpCreateHandle`). Um driver próprio evita HANDLE completamente:
 
@@ -219,9 +219,32 @@ O PoC está **fechado**. Estes são possíveis próximos passos, em ordem cresce
    ObDereferenceObject(proc);
    ```
 
-   Nenhuma dessas chamadas passa por `ObRegisterCallbacks`. EMAC não tem visibilidade. `PsSetProcessNotifyRoutine` etc. são **notify handlers** (recebem evento, não podem bloquear). PatchGuard impede EMAC de hookar MSR/syscall table pra escalar.
+   Nenhuma dessas chamadas passa por `ObRegisterCallbacks`. EMAC não tem visibilidade.
 
-   **Riscos:** HVCI ligado (raro em ambiente de jogo), PPL no target (rubinot não é), EMAC evoluir pra detectar via novo callback (não existe hoje). **Não testado** neste PoC — próximo passo natural.
+   **Implementação:** `driver/rpm.{h,cpp}` + `IOCTL_READ_PROCESS_MEMORY` (0x80B) + `IOCTL_GET_PROCESS_BASE` (0x80C). CLI: `affapp --pib <pid>` e `affapp --rpm <pid> <addr|base|base+0xNNN> <bytes> [--raw]`.
+
+   **Validação empírica em rubinot in-game (PID 8872, EMAC ativo, WDA_MONITOR):**
+
+   ```
+   > affapp --pib 8872
+   [pib] PID=8872 ImageBase=0x140000000                   ← PsGetProcessSectionBaseAddress ok
+
+   > affapp --rpm 8872 base 128
+   000140000000  4D 5A 90 00 03 00 00 00  04 00 00 00 FF FF 00 00  |MZ..............|
+   000140000010  B8 00 00 00 00 00 00 00  40 00 00 00 00 00 00 00  |........@.......|
+   ...
+   000140000040  0E 1F BA 0E 00 B4 09 CD  21 B8 01 4C CD 21 54 68  |........!..L.!Th|
+   000140000050  69 73 20 70 72 6F 67 72  61 6D 20 63 61 6E 6E 6F  |is program canno|
+
+   > affapp --rpm 8872 base+0x178 32
+   000140000178  50 45 00 00 64 86 0B 00  3C A1 91 6A 00 00 00 00  |PE..d...<..j....|
+   ```
+
+   MZ header, DOS stub, PE signature (0x50 0x45), Machine=AMD64 (0x8664), 11 seções — parse PE completo do processo protegido. Contraste: `.NET Process.MainModule` (que faz `OpenProcess(QUERY_INFORMATION)`) retorna `DENIED`.
+
+   **`PsSetProcessNotifyRoutine`** etc. são notify handlers (recebem evento, não podem bloquear). **PatchGuard** impede EMAC de hookar MSR/syscall table pra escalar. Zero contramedida disponível pro EMAC sem re-arquitetar o kernel.
+
+   **Riscos residuais:** HVCI ligado (raro em ambiente de jogo), PPL no target (rubinot não é), EMAC evoluir pra detectar via novo callback (não existe hoje — Microsoft não expõe callback pra "alguém está atachado no meu espaço").
 9. **Overlay/HUD** — desenhar em cima da janela do jogo (D3D overlay ou LayeredWindow topmost) pra visualizar o que o bot está lendo.
 10. **Input synth resistente** — SendInput pode ser detectado. Alternativas: Interception driver (kernel mouse/keyboard), Arduino/Teensy fake HID (hardware, invisível). Necessário se EMAC evoluir pra detectar input sintético.
 11. **Detection resilience testing** — verificar se o EMAC hoje detecta *readers* de DwmGetDxSharedSurface (improvável — é API oficial). Se sim, elevate pra chamada direta de `DwmpDxGetWindowSharedSurface` de `dwmapi.dll` (ord 0x23) que provavelmente ignora checks.
