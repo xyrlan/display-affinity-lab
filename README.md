@@ -174,6 +174,7 @@ Isso confirma o modelo de ameaça: proteger *processo*, não *janela*.
 ## Documentação técnica
 
 - **[docs/POC_CLOSURE.md](docs/POC_CLOSURE.md)** — Retrospectiva completa: fases 1-4, achados, defesas do EMAC mapeadas, roadmap opcional
+- **[docs/emac-hwid-recon.md](docs/emac-hwid-recon.md)** — Recon do trigger de HWID ban do EMAC anti-cheat (mecanismo completo, UUID persistente identificado, HW fingerprint composto, screenshot upload). Recon defensivo, sem bypass fornecido.
 - **[docs/reverse-engineering/rubinot-scan-detection.md](docs/reverse-engineering/rubinot-scan-detection.md)** — 6 sessões RE do EMAC anti-debug + contramedida
 - **[scripts/setup-rubinot-debug.ps1](scripts/setup-rubinot-debug.ps1)** — Rename + IFEO + start dos drivers (com `-Rollback`)
 

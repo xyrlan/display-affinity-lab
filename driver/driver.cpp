@@ -20,6 +20,7 @@
 #include "inject.h"
 #include "process_notify.h"
 #include "rpm.h"
+#include "scan.h"
 #include "../shared/affctl_shared.h"
 
 // GUID de classe do device (privado deste driver). Nao esta associado a nenhum
@@ -263,6 +264,63 @@ static NTSTATUS AffCtlDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp) {
             (PVOID)(ULONG_PTR)in->LdrLoadDllAddr,
             in->DllPath,
             (SIZE_T)in->DllPathLen);
+        break;
+    }
+
+    case IOCTL_SCAN_MEMORY: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(SCAN_MEMORY_INPUT))) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (!OutputAtLeast(stack, sizeof(SCAN_MEMORY_OUTPUT))) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        // Copia local do input pra nao ler do SystemBuffer enquanto o driver
+        // sobrescreve com output (METHOD_BUFFERED: input e output compartilham buffer).
+        SCAN_MEMORY_INPUT in = *reinterpret_cast<PSCAN_MEMORY_INPUT>(buffer);
+        if (in.Pid == 0 || in.Size == 0 || in.PatternLen == 0 ||
+            in.PatternLen > AFFCTL_SCAN_MAX_PATTERN ||
+            in.MaxHits == 0 || in.MaxHits > AFFCTL_SCAN_MAX_HITS ||
+            in.Size > AFFCTL_SCAN_MAX_CHUNK) {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        // Zerar output no SystemBuffer antes de passar pro scan (que preenche).
+        auto out = reinterpret_cast<PSCAN_MEMORY_OUTPUT>(buffer);
+        RtlZeroMemory(out, sizeof(SCAN_MEMORY_OUTPUT));
+        status = affctl::ScanMemoryKernel(
+            Irp,                                        // pra cancellation check
+            (HANDLE)(ULONG_PTR)in.Pid,
+            (ULONG_PTR)in.StartVa,
+            (ULONG_PTR)in.Size,
+            in.Pattern, in.Mask, in.PatternLen,
+            in.MaxHits,
+            out);
+        if (NT_SUCCESS(status)) {
+            info = sizeof(SCAN_MEMORY_OUTPUT);
+        }
+        // STATUS_CANCELLED e reportado pro caller — nao e erro do IOCTL, e
+        // sinal que user pediu pra parar. Info=0 (sem output valido).
+        break;
+    }
+
+    case IOCTL_GET_PROCESS_PEB: {
+        if (buffer == nullptr || !InputAtLeast(stack, sizeof(GET_PEB_INPUT))) {
+            status = STATUS_INVALID_PARAMETER; break;
+        }
+        if (!OutputAtLeast(stack, sizeof(GET_PEB_OUTPUT))) {
+            status = STATUS_BUFFER_TOO_SMALL; break;
+        }
+        GET_PEB_INPUT in = *reinterpret_cast<PGET_PEB_INPUT>(buffer);
+        if (in.Pid == 0) { status = STATUS_INVALID_PARAMETER; break; }
+        ULONG_PTR peb = 0;
+        status = affctl::GetProcessPeb((HANDLE)(ULONG_PTR)in.Pid, &peb);
+        if (NT_SUCCESS(status)) {
+            auto out = reinterpret_cast<PGET_PEB_OUTPUT>(buffer);
+            out->Peb = (unsigned long long)peb;
+            info = sizeof(GET_PEB_OUTPUT);
+        }
         break;
     }
 

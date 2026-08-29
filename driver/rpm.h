@@ -34,4 +34,8 @@ NTSTATUS ReadProcessMemoryKernel(
 // se o processo nao tem section (raro) ou sumiu; NTSTATUS reflete falha maior.
 NTSTATUS GetProcessImageBase(HANDLE pid, ULONG_PTR* outImageBase);
 
+// Retorna PPEB do processo alvo (VA no espaco dele). Combinado com RPM permite
+// walk de PEB->Ldr->InLoadOrderModuleList pra enumerar modulos sem HANDLE.
+NTSTATUS GetProcessPeb(HANDLE pid, ULONG_PTR* outPebVa);
+
 } // namespace affctl

@@ -814,6 +814,374 @@ static int runDemo(int argc, char** argv, int /*startIdx*/) {
     }
 }
 
+// ============================================================================
+// Scan de memoria: --scan-int32, --scan-refine, --scan-show, --scan-clear
+// State em %TEMP%\affapp_scan_state.bin — layout:
+//   [pid u32][hitCount u32][hits u64 * hitCount]
+// Fluxo tipico pra achar HP em rubinot:
+//   1. affapp --scan-int32 <pid> 100    (HP atual, escreve state)
+//   2. (tomar hit no jogo, HP -> 95)
+//   3. affapp --scan-refine <pid> 95    (filtra candidates que agora = 95)
+//   4. repetir 2-3 ate ~5-10 candidates
+//   5. affapp --scan-show               (mostra VAs sobreviventes)
+// ============================================================================
+
+// Nome do slot de state (permite paralelizar multiplos scans em curso:
+// --state hp / --state mp / --state stat3 ...). Default = "default".
+static std::wstring g_stateSlot = L"default";
+
+static std::wstring scanStatePath() {
+    wchar_t tmp[MAX_PATH];
+    GetTempPathW(MAX_PATH, tmp);
+    std::wstring p(tmp);
+    if (!p.empty() && p.back() != L'\\' && p.back() != L'/') p += L'\\';
+    p += L"affapp_scan_";
+    p += g_stateSlot;
+    p += L".bin";
+    return p;
+}
+
+// Extrai --state <name> de argv. Modifica g_stateSlot. Nao remove os args
+// (os handlers ja ignoram flags desconhecidas).
+static void parseStateSlot(int argc, char** argv, int startIdx) {
+    for (int i = startIdx; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--state") == 0) {
+            const char* s = argv[i + 1];
+            std::wstring w;
+            while (*s) w.push_back(static_cast<wchar_t>(*s++));
+            if (!w.empty()) g_stateSlot = w;
+            return;
+        }
+    }
+}
+
+struct ScanState {
+    uint32_t pid;
+    std::vector<uint64_t> hits;
+};
+
+static bool loadScanState(ScanState& out) {
+    std::wstring path = scanStatePath();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint32_t pid = 0, hitCount = 0;
+    DWORD r = 0;
+    if (!ReadFile(h, &pid, sizeof(pid), &r, nullptr) || r != sizeof(pid)) {
+        CloseHandle(h); return false;
+    }
+    if (!ReadFile(h, &hitCount, sizeof(hitCount), &r, nullptr) || r != sizeof(hitCount)) {
+        CloseHandle(h); return false;
+    }
+    if (hitCount > 10'000'000u) { CloseHandle(h); return false; } // sanity
+    out.pid = pid;
+    out.hits.assign(hitCount, 0);
+    if (hitCount > 0) {
+        DWORD need = static_cast<DWORD>(hitCount * sizeof(uint64_t));
+        if (!ReadFile(h, out.hits.data(), need, &r, nullptr) || r != need) {
+            CloseHandle(h); return false;
+        }
+    }
+    CloseHandle(h);
+    return true;
+}
+
+static bool saveScanState(const ScanState& s) {
+    std::wstring path = scanStatePath();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+        nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    uint32_t hitCount = static_cast<uint32_t>(s.hits.size());
+    DWORD w = 0;
+    WriteFile(h, &s.pid, sizeof(s.pid), &w, nullptr);
+    WriteFile(h, &hitCount, sizeof(hitCount), &w, nullptr);
+    if (hitCount > 0) {
+        WriteFile(h, s.hits.data(),
+            static_cast<DWORD>(hitCount * sizeof(uint64_t)), &w, nullptr);
+    }
+    CloseHandle(h);
+    return true;
+}
+
+// Constroi (pattern, mask) pra scan de int32 exato.
+static void int32Pattern(uint32_t value, uint8_t (&pat)[4], uint8_t (&mask)[4]) {
+    memcpy(pat, &value, 4);
+    memset(mask, 0xFF, 4);
+}
+
+// --scan-int32 <pid> <value> [--start HEX] [--end HEX]
+// Full scan. Default range: 0x10000 .. 0x7FFF'FFFF'FFFF (user space).
+// Escreve state (pid + hits) em %TEMP%\affapp_scan_state.bin.
+static int runScanInt32(int argc, char** argv, int startIdx) {
+    if (startIdx + 2 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --scan-int32 <pid> <value> [--start HEX] [--end HEX] [--state NAME]\n");
+        fprintf(stderr, "  default range: 0x10000 .. 0x7FFFFFFF0000\n");
+        fprintf(stderr, "  --state NAME  slot de persistencia (default 'default'). Paraleliza scans.\n");
+        return 2;
+    }
+    parseStateSlot(argc, argv, startIdx);
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    uint32_t value = static_cast<uint32_t>(std::strtoul(argv[startIdx + 2], nullptr, 0));
+    // Default range: user space completo. VAD skip no kernel torna varredura de
+    // 128TB viavel em ~1min mesmo com heap valida grande. User pode restringir
+    // com --start/--end se souber onde alvo aloca (ex: 0x100000000..0x200000000
+    // pra heap tipica de app medio, sub-segundo scan).
+    uint64_t start = 0x10000ULL;
+    uint64_t end   = 0x7FFFFFFF0000ULL;
+    for (int i = startIdx + 3; i + 1 < argc; ++i) {
+        if (std::strcmp(argv[i], "--start") == 0) start = std::strtoull(argv[++i], nullptr, 0);
+        else if (std::strcmp(argv[i], "--end")   == 0) end   = std::strtoull(argv[++i], nullptr, 0);
+    }
+    if (pid == 0 || end <= start) { fprintf(stderr, "params invalidos\n"); return 2; }
+
+    uint8_t pat[4], mask[4];
+    int32Pattern(value, pat, mask);
+
+    try {
+        DriverComm comm;
+        printf("[scan] PID=%u int32=%u (0x%X) range=[0x%llX..0x%llX]\n",
+            pid, value, value, (unsigned long long)start, (unsigned long long)end);
+
+        ScanState state{ pid, {} };
+        uint64_t cursor = start;
+        uint64_t chunkSize = AFFCTL_SCAN_MAX_CHUNK;
+        auto t0 = GetTickCount64();
+        uint64_t chunks = 0;
+        uint64_t totalHits = 0;
+        while (cursor < end) {
+            uint64_t size = (end - cursor < chunkSize) ? (end - cursor) : chunkSize;
+            auto out = comm.scanMemory(pid, cursor, size,
+                                       pat, mask, 4, AFFCTL_SCAN_MAX_HITS);
+            for (uint32_t i = 0; i < out.HitCount; ++i) {
+                state.hits.push_back(out.Hits[i]);
+            }
+            totalHits += out.HitCount;
+            ++chunks;
+            if (out.Truncated) {
+                // Chunk truncou por MaxHits — continua deste ponto pra proximo scanMemory
+                cursor = out.NextVa;
+                if (cursor == 0) cursor += size; // fallback
+            } else {
+                cursor += size;
+            }
+            // Progress a cada 100 chunks (~ 25GB)
+            if (chunks % 100 == 0) {
+                printf("  progress: cursor=0x%llX hits=%llu chunks=%llu elapsed=%llums\n",
+                    (unsigned long long)cursor, (unsigned long long)totalHits,
+                    (unsigned long long)chunks, GetTickCount64() - t0);
+                fflush(stdout);
+            }
+            // Sanity cutoff: rejeitar scans com hits absurdos (padrao muito comum)
+            if (state.hits.size() > 1'000'000ULL) {
+                printf("[scan!] > 1M hits, abortando (padrao muito comum? use --start pra restringir).\n");
+                break;
+            }
+        }
+        auto elapsed = GetTickCount64() - t0;
+        printf("[scan] DONE: %zu hits em %llu chunks, %llums\n",
+            state.hits.size(), (unsigned long long)chunks, elapsed);
+
+        if (!saveScanState(state)) {
+            fprintf(stderr, "[scan!] falha ao salvar state\n"); return 1;
+        }
+        printf("[scan] state salvo em: %ls\n", scanStatePath().c_str());
+        printf("[scan] proximo passo: mude o valor no jogo, rode 'affapp --scan-refine %u <novo_valor>'\n", pid);
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[scan!] %s\n", e.what()); return 1;
+    }
+}
+
+// --scan-refine <pid> <novo_value>
+// Filtra candidates carregados do state por igualdade com novo_value.
+// Faz RPM de 4 bytes pra cada VA (batch); mantem apenas os que casam.
+static int runScanRefine(int argc, char** argv, int startIdx) {
+    if (startIdx + 2 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --scan-refine <pid> <novo_value> [--state NAME]\n");
+        return 2;
+    }
+    parseStateSlot(argc, argv, startIdx);
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    uint32_t newVal = static_cast<uint32_t>(std::strtoul(argv[startIdx + 2], nullptr, 0));
+
+    ScanState state;
+    if (!loadScanState(state)) {
+        fprintf(stderr, "[refine!] sem state — rode --scan-int32 antes\n"); return 1;
+    }
+    if (state.pid != pid) {
+        fprintf(stderr, "[refine!] state e do PID %u, pediu %u\n", state.pid, pid); return 1;
+    }
+    printf("[refine] carregou %zu candidates do PID %u\n", state.hits.size(), pid);
+    if (state.hits.empty()) { fprintf(stderr, "[refine!] sem candidates\n"); return 1; }
+
+    try {
+        DriverComm comm;
+        std::vector<uint64_t> survivors;
+        survivors.reserve(state.hits.size());
+        auto t0 = GetTickCount64();
+        for (size_t i = 0; i < state.hits.size(); ++i) {
+            try {
+                auto buf = comm.readProcessMemory(pid, state.hits[i], 4);
+                if (buf.size() == 4) {
+                    uint32_t v = 0;
+                    memcpy(&v, buf.data(), 4);
+                    if (v == newVal) survivors.push_back(state.hits[i]);
+                }
+            } catch (...) {
+                // VA nao mais acessivel (paginas remapeadas etc) — ignora
+            }
+        }
+        auto elapsed = GetTickCount64() - t0;
+        printf("[refine] %zu -> %zu candidates em %llums\n",
+            state.hits.size(), survivors.size(), elapsed);
+        state.hits = std::move(survivors);
+        if (!saveScanState(state)) { fprintf(stderr, "[refine!] save falhou\n"); return 1; }
+        if (state.hits.size() <= 20) {
+            printf("[refine] survivors:\n");
+            for (uint64_t va : state.hits) printf("  0x%llX\n", (unsigned long long)va);
+        }
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[refine!] %s\n", e.what()); return 1;
+    }
+}
+
+// --scan-show [--state NAME] — mostra state atual (pid + N primeiros hits).
+static int runScanShow(int argc, char** argv, int startIdx) {
+    parseStateSlot(argc, argv, startIdx);
+    ScanState state;
+    if (!loadScanState(state)) { fprintf(stderr, "[show!] sem state\n"); return 1; }
+    printf("[state] PID=%u candidates=%zu\n", state.pid, state.hits.size());
+    size_t max = state.hits.size() < 50 ? state.hits.size() : 50;
+    for (size_t i = 0; i < max; ++i) {
+        printf("  [%zu] 0x%llX\n", i, (unsigned long long)state.hits[i]);
+    }
+    if (state.hits.size() > max) {
+        printf("  ... (+%zu ocultos)\n", state.hits.size() - max);
+    }
+    return 0;
+}
+
+// --scan-clear [--state NAME] — apaga state.
+static int runScanClear(int argc, char** argv, int startIdx) {
+    parseStateSlot(argc, argv, startIdx);
+    std::wstring p = scanStatePath();
+    if (DeleteFileW(p.c_str())) {
+        printf("[clear] state removido\n"); return 0;
+    }
+    if (GetLastError() == ERROR_FILE_NOT_FOUND) {
+        printf("[clear] ja estava vazio\n"); return 0;
+    }
+    fprintf(stderr, "[clear!] DeleteFile err=%lu\n", GetLastError()); return 1;
+}
+
+// --peb <pid> — retorna VA do PEB via PsGetProcessPeb (sem HANDLE).
+static int runPebCmd(int argc, char** argv, int startIdx) {
+    if (startIdx + 1 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --peb <pid>\n"); return 2;
+    }
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    if (pid == 0) return 2;
+    try {
+        DriverComm comm;
+        uint64_t peb = comm.getProcessPeb(pid);
+        printf("[peb] PID=%u PEB=0x%llX\n", pid, (unsigned long long)peb);
+        return peb ? 0 : 1;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[peb!] %s\n", e.what()); return 1;
+    }
+}
+
+// --modules <pid>
+// Walk PEB->Ldr->InLoadOrderModuleList via RPM. Lista todo modulo carregado
+// (nome, DllBase, SizeOfImage). Layout PEB/LDR_DATA_TABLE_ENTRY x64 estavel
+// desde Win10 (nao muda entre 22H2/24H2). Limite defensivo: 512 iteracoes.
+static int runModulesCmd(int argc, char** argv, int startIdx) {
+    if (startIdx + 1 >= argc) {
+        fprintf(stderr, "uso: affapp.exe --modules <pid>\n"); return 2;
+    }
+    uint32_t pid = static_cast<uint32_t>(std::strtoul(argv[startIdx + 1], nullptr, 0));
+    if (pid == 0) return 2;
+
+    auto readU64 = [](DriverComm& c, uint32_t p, uint64_t va) -> uint64_t {
+        auto b = c.readProcessMemory(p, va, 8);
+        if (b.size() != 8) throw std::runtime_error("read u64 falhou");
+        uint64_t v = 0; memcpy(&v, b.data(), 8); return v;
+    };
+    auto readU32 = [](DriverComm& c, uint32_t p, uint64_t va) -> uint32_t {
+        auto b = c.readProcessMemory(p, va, 4);
+        if (b.size() != 4) throw std::runtime_error("read u32 falhou");
+        uint32_t v = 0; memcpy(&v, b.data(), 4); return v;
+    };
+    auto readU16 = [](DriverComm& c, uint32_t p, uint64_t va) -> uint16_t {
+        auto b = c.readProcessMemory(p, va, 2);
+        if (b.size() != 2) throw std::runtime_error("read u16 falhou");
+        uint16_t v = 0; memcpy(&v, b.data(), 2); return v;
+    };
+
+    try {
+        DriverComm comm;
+        uint64_t peb = comm.getProcessPeb(pid);
+        if (!peb) { fprintf(stderr, "[modules!] PEB=0\n"); return 1; }
+        printf("[modules] PID=%u PEB=0x%llX\n", pid, (unsigned long long)peb);
+
+        // PEB->Ldr @ +0x18
+        uint64_t ldr = readU64(comm, pid, peb + 0x18);
+        if (!ldr) { fprintf(stderr, "[modules!] Ldr=0\n"); return 1; }
+
+        // InLoadOrderModuleList.Flink @ Ldr+0x10 (LIST_ENTRY first field)
+        uint64_t headVa = ldr + 0x10;
+        uint64_t current = readU64(comm, pid, headVa);
+        if (!current) { fprintf(stderr, "[modules!] first Flink=0\n"); return 1; }
+
+        printf("%-4s %-18s %-10s %s\n", "#", "DllBase", "Size", "Name");
+        int count = 0;
+        while (current != headVa && count < 512) {
+            // LDR_DATA_TABLE_ENTRY offsets (Win10/11 x64):
+            //   +0x30 = DllBase (PVOID)
+            //   +0x40 = SizeOfImage (ULONG)
+            //   +0x58 = BaseDllName.Length (u16), +0x58+8 = Buffer (PVOID)
+            uint64_t entry = current; // InLoadOrderLinks is first field, entry == current
+            uint64_t dllBase = 0;
+            uint32_t sizeOfImage = 0;
+            uint16_t nameLen = 0;
+            uint64_t nameBuf = 0;
+            try {
+                dllBase = readU64(comm, pid, entry + 0x30);
+                sizeOfImage = readU32(comm, pid, entry + 0x40);
+                nameLen = readU16(comm, pid, entry + 0x58);
+                nameBuf = readU64(comm, pid, entry + 0x58 + 8);
+            } catch (...) {
+                fprintf(stderr, "  [entry %d] read falhou @ 0x%llX\n", count, (unsigned long long)entry);
+                break;
+            }
+            std::string name = "(?)";
+            if (nameBuf && nameLen > 0 && nameLen < 512) {
+                try {
+                    auto nb = comm.readProcessMemory(pid, nameBuf, nameLen);
+                    // UTF-16 → ASCII simples (drop bytes altos)
+                    name.clear();
+                    for (size_t i = 0; i + 1 < nb.size(); i += 2) {
+                        uint16_t ch = nb[i] | (nb[i+1] << 8);
+                        name.push_back(ch < 0x80 ? static_cast<char>(ch) : '?');
+                    }
+                } catch (...) { name = "(read fail)"; }
+            }
+            printf("[%3d] 0x%016llX %8u  %s\n",
+                count, (unsigned long long)dllBase, sizeOfImage, name.c_str());
+            ++count;
+            // Proximo Flink @ current+0x00
+            uint64_t next = readU64(comm, pid, current);
+            if (!next || next == current) break;
+            current = next;
+        }
+        printf("[modules] total: %d modulos\n", count);
+        return 0;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "[modules!] %s\n", e.what()); return 1;
+    }
+}
+
 // --pib <pid> — Process Image Base. Retorna VA do PE image base via kernel
 // PsGetProcessSectionBaseAddress. Sem OpenProcess, sem HANDLE — bypassa
 // ObRegisterCallbacks. Util pra ancorar --rpm em processos que negam
@@ -873,8 +1241,10 @@ static int runRpm(int argc, char** argv, int startIdx) {
     }
     uint32_t bytes = static_cast<uint32_t>(std::strtoul(argv[startIdx + 3], nullptr, 0));
     bool raw = false;
+    const char* outPath = nullptr;
     for (int i = startIdx + 4; i < argc; ++i) {
         if (std::strcmp(argv[i], "--raw") == 0) raw = true;
+        else if (std::strcmp(argv[i], "--out") == 0 && i + 1 < argc) outPath = argv[++i];
     }
 
     if (pid == 0 || bytes == 0 || bytes > AFFCTL_RPM_MAX) {
@@ -885,14 +1255,27 @@ static int runRpm(int argc, char** argv, int startIdx) {
 
     try {
         DriverComm comm;
-        printf("[rpm] PID=%u addr=0x%llX size=%u\n",
+        // Em --raw stdout eh binario puro; headers vao pra stderr pra nao corromper.
+        FILE* logFp = raw ? stderr : stdout;
+        fprintf(logFp, "[rpm] PID=%u addr=0x%llX size=%u\n",
                pid, (unsigned long long)addr, bytes);
         auto buf = comm.readProcessMemory(pid, addr, bytes);
-        printf("[rpm] OK — %zu bytes lidos\n", buf.size());
+        fprintf(logFp, "[rpm] OK - %zu bytes lidos\n", buf.size());
 
+        if (outPath) {
+            FILE* fout = nullptr;
+            if (fopen_s(&fout, outPath, "wb") != 0 || !fout) {
+                fprintf(stderr, "[rpm!] fopen %s falhou\n", outPath); return 1;
+            }
+            fwrite(buf.data(), 1, buf.size(), fout);
+            fclose(fout);
+            fprintf(logFp, "[rpm] escrito em %s\n", outPath);
+            return 0;
+        }
         if (raw) {
             _setmode(_fileno(stdout), _O_BINARY);
             fwrite(buf.data(), 1, buf.size(), stdout);
+            fflush(stdout);
             return 0;
         }
 
@@ -1002,6 +1385,12 @@ int main(int argc, char** argv) {
     if (std::strcmp(cmd, "--capture")         == 0) return runCapture(argc, argv, 1);
     if (std::strcmp(cmd, "--rpm")             == 0) return runRpm(argc, argv, 1);
     if (std::strcmp(cmd, "--pib")             == 0) return runPib(argc, argv, 1);
+    if (std::strcmp(cmd, "--peb")             == 0) return runPebCmd(argc, argv, 1);
+    if (std::strcmp(cmd, "--modules")         == 0) return runModulesCmd(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-int32")      == 0) return runScanInt32(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-refine")     == 0) return runScanRefine(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-show")       == 0) return runScanShow(argc, argv, 1);
+    if (std::strcmp(cmd, "--scan-clear")      == 0) return runScanClear(argc, argv, 1);
 
     // Comando desconhecido -> mensagem clara + help + exit code 2 (usage error).
     fprintf(stderr, "affapp: comando desconhecido: '%s'\n\n", cmd);

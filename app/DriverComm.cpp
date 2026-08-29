@@ -162,6 +162,39 @@ uint64_t DriverComm::getProcessImageBase(uint32_t pid) {
     return out.ImageBase;
 }
 
+uint64_t DriverComm::getProcessPeb(uint32_t pid) {
+    if (pid == 0) throw std::invalid_argument("getProcessPeb: pid=0");
+    GET_PEB_INPUT in{}; in.Pid = pid;
+    GET_PEB_OUTPUT out{};
+    ioctl(IOCTL_GET_PROCESS_PEB, &in, sizeof(in), &out, sizeof(out), nullptr);
+    return out.Peb;
+}
+
+SCAN_MEMORY_OUTPUT DriverComm::scanMemory(
+    uint32_t pid, uint64_t startVa, uint64_t size,
+    const uint8_t* pattern, const uint8_t* mask, uint32_t patternLen,
+    uint32_t maxHits)
+{
+    if (pid == 0 || size == 0 || size > AFFCTL_SCAN_MAX_CHUNK ||
+        patternLen == 0 || patternLen > AFFCTL_SCAN_MAX_PATTERN ||
+        maxHits == 0 || maxHits > AFFCTL_SCAN_MAX_HITS) {
+        throw std::invalid_argument("scanMemory: parametros invalidos");
+    }
+    SCAN_MEMORY_INPUT in{};
+    in.Pid = pid;
+    in.StartVa = startVa;
+    in.Size = size;
+    in.PatternLen = patternLen;
+    in.MaxHits = maxHits;
+    memcpy(in.Pattern, pattern, patternLen);
+    memcpy(in.Mask, mask, patternLen);
+    SCAN_MEMORY_OUTPUT out{};
+    ioctl(IOCTL_SCAN_MEMORY,
+          &in, sizeof(in),
+          &out, sizeof(out), nullptr);
+    return out;
+}
+
 std::vector<uint8_t> DriverComm::readProcessMemory(uint32_t pid, uint64_t address, uint32_t size) {
     if (pid == 0 || size == 0 || size > AFFCTL_RPM_MAX) {
         throw std::invalid_argument("readProcessMemory: parametros invalidos");

@@ -26,6 +26,7 @@
 // base do processo alvo (mesmo que EPROCESS->SectionBaseAddress). Nao esta
 // no ntddk.h publico — declarar aqui. Nao requer attach, nao abre HANDLE.
 extern "C" NTKERNELAPI PVOID NTAPI PsGetProcessSectionBaseAddress(PEPROCESS Process);
+extern "C" NTKERNELAPI PPEB  NTAPI PsGetProcessPeb(PEPROCESS Process);
 
 namespace affctl {
 
@@ -111,6 +112,22 @@ NTSTATUS GetProcessImageBase(HANDLE pid, ULONG_PTR* outImageBase) {
     PVOID base = PsGetProcessSectionBaseAddress(proc);
     *outImageBase = (ULONG_PTR)base;
 
+    ObDereferenceObject(proc);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS GetProcessPeb(HANDLE pid, ULONG_PTR* outPebVa) {
+    if (pid == nullptr || outPebVa == nullptr) return STATUS_INVALID_PARAMETER;
+    *outPebVa = 0;
+    PEPROCESS proc = nullptr;
+    NTSTATUS s = PsLookupProcessByProcessId(pid, &proc);
+    if (!NT_SUCCESS(s)) return STATUS_NOT_FOUND;
+    // PsGetProcessPeb pode ser chamado em qualquer contexto (nao precisa attach).
+    // Retorna PPEB no address space do processo alvo. Se caller estiver em outro
+    // contexto (attached ou nao), o VA sozinho nao e desreferenciavel — precisa
+    // KeStackAttachProcess (ou RPM subsequente) pra ler.
+    PPEB peb = PsGetProcessPeb(proc);
+    *outPebVa = (ULONG_PTR)peb;
     ObDereferenceObject(proc);
     return STATUS_SUCCESS;
 }

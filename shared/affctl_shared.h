@@ -68,6 +68,17 @@
 // pra escanear estruturas relativas ao image base em alvos que negam OpenProcess.
 #define IOCTL_GET_PROCESS_BASE \
     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Scan de memoria por padrao (bytes com mascara wildcard). Kernel itera pagina
+// por pagina no espaco do alvo (via attach); MmIsAddressValid rejeita rapido +
+// SEH cobre races. Skip adaptativo em ranges vazios (64KB->1MB->64MB) evita
+// varrer 16TB sequencialmente. Retorna array de VAs onde matched, com flag de
+// truncamento (user chunkifica pra continuar).
+#define IOCTL_SCAN_MEMORY \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// Retorna PPEB do processo alvo (via PsGetProcessPeb, kernel export). Sem HANDLE.
+// Base pra --modules walk (PEB->Ldr->InLoadOrderModuleList) via RPM subsequente.
+#define IOCTL_GET_PROCESS_PEB \
+    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x80E, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 // Limite defensivo de bytes lidos da tagWND numa unica chamada de READ_RANGE.
 // tagWND real ocupa ~0x300..0x400 bytes em Win10/11; 1024 e um teto generoso
@@ -194,6 +205,34 @@ typedef struct _GET_PROCESS_BASE_INPUT {
 typedef struct _GET_PROCESS_BASE_OUTPUT {
     unsigned long long ImageBase; // 0 se falhou (proc morreu / sem section)
 } GET_PROCESS_BASE_OUTPUT, *PGET_PROCESS_BASE_OUTPUT;
+
+// IOCTL_SCAN_MEMORY - limites
+#define AFFCTL_SCAN_MAX_PATTERN 64u    // bytes por padrao
+#define AFFCTL_SCAN_MAX_HITS    4096u  // hits retornados por chamada
+#define AFFCTL_SCAN_MAX_CHUNK   (256u * 1024u * 1024u)  // 256MB por chamada
+// IOCTL_SCAN_MEMORY - input
+typedef struct _SCAN_MEMORY_INPUT {
+    unsigned long long Pid;
+    unsigned long long StartVa;           // VA inicial (inclusivo)
+    unsigned long long Size;              // bytes a varrer (<= AFFCTL_SCAN_MAX_CHUNK)
+    unsigned long      PatternLen;        // 1..AFFCTL_SCAN_MAX_PATTERN
+    unsigned long      MaxHits;           // 1..AFFCTL_SCAN_MAX_HITS
+    unsigned char      Pattern[AFFCTL_SCAN_MAX_PATTERN];
+    unsigned char      Mask[AFFCTL_SCAN_MAX_PATTERN];  // 0xFF=match exato, 0x00=wildcard
+} SCAN_MEMORY_INPUT, *PSCAN_MEMORY_INPUT;
+// IOCTL_SCAN_MEMORY - output
+typedef struct _SCAN_MEMORY_OUTPUT {
+    unsigned long      HitCount;                    // hits validos em Hits[]
+    unsigned long      Truncated;                   // 1 = MaxHits atingido, cursor invalido
+    unsigned long long NextVa;                      // proximo VA a escanear (0 se acabou)
+    unsigned long long Hits[AFFCTL_SCAN_MAX_HITS];  // VAs absolutos onde matched
+} SCAN_MEMORY_OUTPUT, *PSCAN_MEMORY_OUTPUT;
+
+// IOCTL_GET_PROCESS_PEB - input/output
+typedef struct _GET_PEB_INPUT { unsigned long long Pid; } GET_PEB_INPUT, *PGET_PEB_INPUT;
+typedef struct _GET_PEB_OUTPUT {
+    unsigned long long Peb;  // 0 se falhou / processo sem PEB (raro)
+} GET_PEB_OUTPUT, *PGET_PEB_OUTPUT;
 
 // IOCTL_AFF_DIAG - input: HWND_INPUT ; output: AFF_DIAG_OUTPUT
 // Despejo cru (layout-agnostico) para diagnosticar a resolucao HWND->tagWND.
