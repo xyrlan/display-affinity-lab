@@ -145,6 +145,19 @@ bool installHook() {
     FARPROC target = GetProcAddress(user32, "SetWindowDisplayAffinity");
     if (!target) return false;
 
+    // [diag] Se o app moderno chama SetWindowDisplayAffinity via win32u direto,
+    // hookar user32 nao adianta. Loga se win32u tambem esta carregado e onde ele
+    // expoe NtUserSetWindowDisplayAffinity — pra confirmar Causa 2.
+    HMODULE win32u = GetModuleHandleW(L"win32u.dll");
+    FARPROC ntUserSet = win32u
+        ? GetProcAddress(win32u, "NtUserSetWindowDisplayAffinity")
+        : nullptr;
+    wchar_t probe[192];
+    wsprintfW(probe,
+              L"affbypass: user32!Set=%p  win32u!NtUserSet=%p  (win32u loaded=%d)",
+              target, ntUserSet, win32u ? 1 : 0);
+    OutputDebugStringW(probe);
+
     if (MH_CreateHook(target, &Hook_SetWindowDisplayAffinity,
                       reinterpret_cast<LPVOID*>(&g_origSet)) != MH_OK) {
         return false;
@@ -153,10 +166,79 @@ bool installHook() {
     return true;
 }
 
+// --- Filtro por processo (modo --global-hook do affapp) -------------------
+// Quando `affapp.exe --global-hook <exe>` roda, ele grava o nome do exe alvo em
+// %TEMP%\affbypass_target.txt e faz SetWindowsHookEx global. Windows carrega
+// esta DLL em CADA processo que dispatcha mensagens — dezenas ou centenas de
+// processos. Esta funcao permite que a DLL "recuse" carregar em processos que
+// nao sao o alvo (retornando FALSE do DllMain, o loader desmapeia).
+//
+// Se o arquivo nao existir OU estiver vazio => sem filtro, aceita todos os
+// processos (comportamento retrocompativel com --watch/--inject).
+bool ShouldActivateInThisProcess() {
+    wchar_t tmpPath[MAX_PATH];
+    if (GetTempPathW(MAX_PATH, tmpPath) == 0) return true;
+    lstrcatW(tmpPath, L"affbypass_target.txt");
+
+    HANDLE h = CreateFileW(tmpPath, GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return true; // sem filtro = todos os processos
+
+    char raw[512] = {0};
+    DWORD n = 0;
+    ReadFile(h, raw, sizeof(raw) - 1, &n, nullptr);
+    CloseHandle(h);
+
+    // Trim whitespace/newlines do final.
+    while (n > 0 && (raw[n-1] == '\r' || raw[n-1] == '\n' ||
+                     raw[n-1] == ' '  || raw[n-1] == '\t')) --n;
+    raw[n] = 0;
+    if (n == 0) return true; // filtro vazio = todos
+
+    // Converte filtro pra wide.
+    wchar_t filter[MAX_PATH] = {0};
+    if (MultiByteToWideChar(CP_ACP, 0, raw, -1, filter, MAX_PATH) == 0) return true;
+
+    // Basename do proprio processo.
+    wchar_t exePath[MAX_PATH];
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) return true;
+    wchar_t* base = wcsrchr(exePath, L'\\');
+    base = base ? base + 1 : exePath;
+
+    // Compara case-insensitive ordinal (evita locale surprises).
+    return CompareStringOrdinal(filter, -1, base, -1, TRUE) == CSTR_EQUAL;
+}
+
 } // namespace
+
+// --- Export do hook proc pro SetWindowsHookEx (modo --global-hook) --------
+// WH_GETMESSAGE handler — passa adiante sem tocar. O trabalho REAL acontece
+// no DllMain (installHook em user32!SetWindowDisplayAffinity) quando o Windows
+// carrega esta DLL num processo que dispatcha mensagens. Este export existe
+// so pra satisfazer o contrato do SetWindowsHookEx (precisa de um HOOKPROC).
+extern "C" __declspec(dllexport)
+LRESULT CALLBACK GlobalHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    return CallNextHookEx(nullptr, nCode, wParam, lParam);
+}
 
 BOOL WINAPI DllMain(HINSTANCE hInst, DWORD reason, LPVOID /*reserved*/) {
     if (reason == DLL_PROCESS_ATTACH) {
+        // Filtro do modo --global-hook: se ha filter file com nome diferente,
+        // recusamos o load. O Windows desmapeia a DLL — sem hook, sem side effect.
+        // Se nao ha filter file (modo --watch/--inject classico), passa direto.
+        if (!ShouldActivateInThisProcess()) {
+            return FALSE;
+        }
+
+        // [diag] Timing: primeira linha de vida da DLL no alvo. Se voce visualmente
+        // ve a proteccao acontecer ANTES desta linha aparecer no DebugView, o alvo
+        // chamou SetWindowDisplayAffinity antes da nossa APC disparar (Causa 1).
+        wchar_t tag[128];
+        wsprintfW(tag, L"affbypass: DllMain ATTACH pid=%u tick=%u",
+                  GetCurrentProcessId(), GetTickCount());
+        OutputDebugStringW(tag);
+
         DisableThreadLibraryCalls(hInst);
         bool ok = installHook();
         writeStatusFile(ok ? L"engajado (hook instalado)" : L"FALHOU a instalar hook");

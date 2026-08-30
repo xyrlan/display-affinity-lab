@@ -26,3 +26,16 @@ third_party/minhook/
 
 # Cache de PDBs baixados do Symbol Server
 SymCache/
+
+# MCP config local (contem token de sessao do x64dbg-mcp-server)
+.mcp.json
+
+# Test outputs (probes BitBlt/PW/DDA/dxshared salvam BMPs no root)
+/*.bmp
+
+# Runtime logs (emac-client64, emac-core, RubinOT.exe.log rotacoes)
+logs/*.log
+
+# Local scratch de captura Procmon / dumps binarios
+*.pml
+*.etl

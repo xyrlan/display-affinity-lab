@@ -166,6 +166,14 @@ VOID InjectApcKernelRoutine(
 {
     if (Apc == nullptr) return;
     auto* aa = CONTAINING_RECORD(Apc, AffctlApc, apc);
+
+    // [diag] Marcador incondicional: se esta linha aparece, a APC user-mode
+    // esta prestes a executar o trampolim. Se nunca aparece pra um PID, a
+    // thread nunca entrou em wait alertable.
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "[affctl] APC dispatching: pid=%p (owner=%p)\n",
+        PsGetCurrentProcessId(), aa->ownerProc);
+
     if (aa->ownerProc) {
         ObDereferenceObject(aa->ownerProc);
     }
