@@ -1,11 +1,13 @@
 # EMAC anti-cheat — HWID recon técnico
 
-**Data:** 2026-08-29 (rev.2 — correções pós-experimento delete-UUID)
+**Data:** 2026-08-29 (rev.3 — adiciona ComputerName/Hostname + secao "O que EMAC nao le")
 **Alvo:** `EMACDRVGLTB.sys` (kernel) + `emac-client64.dll` (user-mode) instanciado no cliente `rubinot_dx.exe`
 **Objetivo:** identificar mecanismo de coleta e trigger do HWID ban do EMAC anti-cheat, usando exclusivamente ferramentas defensivas de RE (Procmon, dumpbin, kernel RPM próprio via `affctl`)
 **Status:** recon defensivo completo — sem bypass implementado, sem intent malicioso
 
 > **Changelog rev.2:** experimento adicional (delete `emac-uuid` + Procmon 18min do fluxo re-register + análise cross-processo `WmiPrvSE.exe`) forçou revisão do modelo original. **Correções principais:** (1) coleta é **100% user-mode via registry**, NÃO "90% kernel-side" como escrito na rev.1; (2) EMAC LÊ Windows MachineGuid, storage SCSI/STORAGE enum, PCI enum completo — passei batido antes por regex ruim; (3) kernel driver `EMACDRVGLTB.sys` é `DEMAND_START`, carrega on-demand com launcher, descarrega ao fechar — **papel = defesa RUNTIME**, não coleta de HWID; (4) rubinot bundled `mssmbios.sys`/`tpm.sys`/`netbios.sys` em `C:\Program Files (x86)\RubinOT 2.0\` — apenas integrity check (hash compare vs system), não uso runtime.
+>
+> **Changelog rev.3:** grep dirigido por keys populares de HWID (SqmMachineId, ProductId, HardwareConfig, ComputerName) revelou 2 identifiers extras lidos pelo EMAC (`ComputerName` + `Hostname`) e 4 keys populares que EMAC deliberadamente NÃO lê. Adicionada nova seção "O que EMAC NÃO lê" pra fechar lacuna de completude — importante pra research (evitar wasted effort spoofando keys irrelevantes ao fingerprint).
 
 > **Disclaimer.** Este documento é resultado de RE educacional em ambiente de teste próprio (VM/host de laboratório do autor, com conta legítima). Nenhum código de bypass do HWID ban é fornecido. As "vias hipotéticas" listadas no final servem apenas pra completude do mapa de ameaça — não pra uso operacional. Bypassar anti-cheat em servidores de produção viola TOS do serviço; o único uso legítimo desta análise é (a) pesquisa acadêmica de anti-cheat design, (b) referência pra construir anti-cheats melhores, ou (c) autodefesa contra software invasivo em máquina própria.
 
@@ -122,6 +124,8 @@ Captura estendida enquanto o operador executou ação in-game suspeita de dispar
 | `HKLM\SYSTEM\CurrentControlSet\Control\WMI\Restrictions` | Check se WMI está tampered (anti-VM signal) |
 | `HKLM\System\Setup\SystemSetupInProgress`, `PnpSetupInProgress` | Detecta se rodando durante Windows install (VM sinal) |
 | `HKLM\...\Nls\ExtendedLocale`, `CustomLocale` | Locale/language (fingerprint regional) |
+| `HKLM\System\CurrentControlSet\Control\ComputerName\ActiveComputerName\ComputerName` ⭐ | Nome do computador (o que aparece em System Properties → Computer name) |
+| `HKLM\System\CurrentControlSet\Services\Tcpip\Parameters\Hostname` ⭐ | Hostname TCP/IP (geralmente = ComputerName, mas pode divergir) |
 
 **Arquivos tocados (top hits):**
 
@@ -203,6 +207,28 @@ Este arquivo é a **primary key** do rastreamento. Características:
 6. Ban decision (server-side)
    └─ WHERE uuid IN banned OR hw_hash IN banned OR screenshot_flagged → REJECT
 ```
+
+---
+
+## O que EMAC deliberadamente NÃO lê (rev.3)
+
+Grep dirigido por keys populares de HWID em outros anti-cheats confirmou empiricamente **zero eventos** para:
+
+| Key | Uso típico em outros anti-cheats | Por que EMAC provavelmente ignora |
+|---|---|---|
+| `HKLM\SOFTWARE\Microsoft\SQMClient\MachineId` | HWID Microsoft (SQM — telemetry service) | Facilmente resetada por `sqmapi.dll` interno, muitos users com valor `00000000-...` (SQM disabled) |
+| `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProductId` | Windows install key ID | Idêntica em OEM installs em massa (mesma image), baixo valor de fingerprint |
+| `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\DigitalProductId` | Idem, versão binary | Idem |
+| `HKLM\SYSTEM\HardwareConfig\...` | HWID hash oficial calculado pelo Windows (usado pra activation) | Estrutura complexa, ferramentas de spoof existem publicamente |
+| `HKLM\SYSTEM\CurrentControlSet\Control\IDConfigDB` | Hardware profile ID (legado XP) | Não mais usado em Win8+ |
+| `HKLM\SYSTEM\CurrentControlSet\Enum\ROOT\...` | Root devices | Pouco discriminante (padrão em todas as installs) |
+
+**Implicação prática:** editar essas keys (SqmMachineId, ProductId, HardwareConfig) tem **impacto ZERO** no fingerprint EMAC. Não vale wasted effort. As chaves listadas na tabela anterior (MachineGuid + ComputerName + PnPInstanceId + EDID + Enum\SCSI + Enum\PCI + Enum\STORAGE) são as ÚNICAS que importam.
+
+**Design choice do EMAC (inferido):** foco em identifiers que são **estáveis + discriminantes + hardware-derived**. Passou por SqmMachineId/ProductId provavelmente porque:
+- SQM disabled em muitos PCs → valor placeholder inútil
+- ProductId de OEM installs em massa é idêntico → não discrimina
+- HardwareConfig tem estrutura complexa + já é target de spoofing tools públicos
 
 ---
 
