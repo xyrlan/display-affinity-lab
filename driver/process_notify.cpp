@@ -208,6 +208,13 @@ bool markProcessWatched(HANDLE pid, PEPROCESS process, WatchEntry* watch) {
     NTSTATUS s = affctl::AllocRemotePathBuffer(
         process, watch->DllPath, watch->DllPathBytes,
         watch->LdrLoadDllAddr, &remoteBase);
+
+    // [diag] Log incondicional — permite ver no DebugView se o processo casou
+    // e se a section+trampolim foi construida com sucesso no VA dele.
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "[affctl] markProcessWatched: pid=%p name='%ws' status=0x%08X remoteBase=%p\n",
+        pid, watch->ImageName, s, remoteBase);
+
     if (!NT_SUCCESS(s) || remoteBase == nullptr) return false;
 
     // Encontra slot livre (nao precisa de LRU aqui — se cheio, desistimos).
@@ -247,7 +254,16 @@ VOID ThreadNotifyCb(HANDLE ProcessId, HANDLE ThreadId, BOOLEAN Create) {
     // desmapeasse a view, quebraria as proximas. A cleanup fica implicita:
     // view some com o VA do processo alvo quando ele morre, e o slot em
     // g_watched e limpo em UpdateWatchedListForExit.
-    affctl::QueueLoadLibraryApc(thread, remoteBase, /*ownerProcess=*/nullptr);
+    NTSTATUS qs = affctl::QueueLoadLibraryApc(thread, remoteBase, /*ownerProcess=*/nullptr);
+
+    // [diag] Log incondicional — mostra quantas APCs foram enfileiradas por PID
+    // do alvo. Se este contador so aparecer com uma thread e nunca mais, o alvo
+    // nao esta criando threads novas — precisa de estrategia diferente (early
+    // inject via LoadImage, ou APC nas threads EXISTENTES via enumeracao).
+    DbgPrintEx(DPFLTR_IHVDRIVER_ID, DPFLTR_ERROR_LEVEL,
+        "[affctl] ThreadNotifyCb: pid=%p tid=%p queue=0x%08X\n",
+        ProcessId, ThreadId, qs);
+
     ObDereferenceObject(thread);
 }
 
